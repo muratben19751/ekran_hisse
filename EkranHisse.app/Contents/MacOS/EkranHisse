@@ -1,0 +1,9 @@
+#!/bin/bash
+# EkranHisse.app launcher
+RESOURCES="$(cd "$(dirname "$0")/../Resources" && pwd)"
+LOG="$HOME/Library/Logs/EkranHisse.log"
+
+pkill -f "EkranHisse/Contents/Resources/main.py" 2>/dev/null
+
+cd "$RESOURCES"
+exec arch -arm64 /usr/bin/python3 -W ignore main.py >> "$LOG" 2>&1

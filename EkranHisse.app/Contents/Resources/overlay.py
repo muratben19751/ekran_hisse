@@ -35,7 +35,7 @@ def _main_screen():
     return primary.availableGeometry()
 
 
-
+def load_stocks():
     if os.path.exists(STOCKS_FILE):
         with open(STOCKS_FILE) as f:
             return json.load(f)

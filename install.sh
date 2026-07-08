@@ -1,11 +1,18 @@
 #!/bin/bash
 set -e
 
-APP_PATH="/Users/i034216/Documents/myAI_projects/ekran_hisse/EkranHisse.app"
+# Script'in bulunduğu dizinden otomatik path hesapla
+PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_PATH="$PROJ_DIR/EkranHisse.app"
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 PLIST="$LAUNCH_AGENTS/com.local.ekranhisse.plist"
 
 echo "=== EkranHisse Kurulum ==="
+echo "Proje dizini: $PROJ_DIR"
+
+# Bağımlılıkları kur
+echo "Bağımlılıklar kuruluyor..."
+pip3 install -q PySide6 yfinance pyobjc-framework-Cocoa
 
 mkdir -p "$LAUNCH_AGENTS"
 
@@ -32,10 +39,11 @@ EOF
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
 
+echo "✓ Kurulum tamamlandı"
 echo "✓ Her login'de otomatik başlayacak"
 echo ""
-echo "Şimdi çift tıklayarak aç:"
-echo "  $APP_PATH"
+echo "Şimdi başlatmak için:"
+echo "  open \"$APP_PATH\""
 echo ""
 echo "Kaldırmak için:"
-echo "  launchctl unload $PLIST && rm $PLIST"
+echo "  launchctl unload \"$PLIST\" && rm \"$PLIST\""

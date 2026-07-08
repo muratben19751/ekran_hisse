@@ -25,7 +25,17 @@ NEU_COLOR    = "#e2e8f0"
 BTN_HOVER    = "rgba(255,255,255,40)"
 
 
-def load_stocks():
+def _main_screen():
+    """En soldaki (veya tek) ekranı döndür — macOS'ta ana ekran budur."""
+    screens = QApplication.screens()
+    if not screens:
+        return QApplication.primaryScreen().availableGeometry()
+    # En küçük x koordinatlı ekran = en solda = macOS main screen
+    primary = min(screens, key=lambda s: s.geometry().x())
+    return primary.availableGeometry()
+
+
+
     if os.path.exists(STOCKS_FILE):
         with open(STOCKS_FILE) as f:
             return json.load(f)
@@ -110,7 +120,7 @@ class OverlayWindow(QWidget):
         self.symbols   = load_stocks()
         self.rows      = {}
 
-        sc = QApplication.primaryScreen().availableGeometry()
+        sc = _main_screen()
         self._sc = sc
 
         self.setWindowFlags(
@@ -141,6 +151,7 @@ class OverlayWindow(QWidget):
             self._refresh()
 
     def _reposition(self):
+        self._sc = _main_screen()
         sc = self._sc
         self.adjustSize()
         # Pencereyi tam sağa yapıştır; sadece sekme görünür
@@ -311,7 +322,8 @@ class OverlayWindow(QWidget):
         self._is_open = not self._is_open
         self.arrow.setText("▶" if self._is_open else "◀")
 
-        sc = self._sc
+        sc = _main_screen()
+        self._sc = sc
         # Pencereyi sağa kaydır; açıksa panel genişliği kadar sola git
         target_x = sc.x() + sc.width() - TAB_W - (PANEL_W if self._is_open else 0)
         self.move(target_x, self.y())

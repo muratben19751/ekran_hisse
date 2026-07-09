@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 *.log
+notes_config.env
+notes_data.json

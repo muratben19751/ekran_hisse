@@ -1,44 +1,64 @@
 import threading
 import urllib.request
-import urllib.parse
 import json
+import os
 
-API_URL = "https://muratben.com/notes_api.php"
-SECRET  = "ekranhisse_secret_2024"
+# Token ve Gist ID ayrı config dosyasından okunur (git'e gitmez)
+_cfg_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
+_cfg = {}
+if os.path.exists(_cfg_file):
+    with open(_cfg_file) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                _cfg[k.strip()] = v.strip()
+
+GIST_ID     = _cfg.get("GIST_ID", "")
+GITHUB_TOKEN = _cfg.get("GITHUB_TOKEN", "")
+GIST_API    = f"https://api.github.com/gists/{GIST_ID}"
 
 
-def _request(data=None):
-    try:
-        headers = {"X-Secret": SECRET}
-        if data is not None:
-            payload = json.dumps(data).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-            req = urllib.request.Request(
-                API_URL,
-                data=payload,
-                headers=headers,
-                method="POST",
-            )
-        else:
-            req = urllib.request.Request(API_URL, headers=headers, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        print("notes_api hatası:", e)
-        return None
+def _headers():
+    return {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+    }
 
 
 def fetch_notes(callback):
     def _run():
-        result = _request()
-        notes = result.get("notes", []) if result else []
-        callback(notes)
+        try:
+            req = urllib.request.Request(GIST_API, headers=_headers(), method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            content = data["files"]["notes.json"]["content"]
+            notes = json.loads(content).get("notes", [])
+            callback(notes)
+        except Exception as e:
+            print("notes fetch hatası:", e)
+            callback(None)
     threading.Thread(target=_run, daemon=True).start()
 
 
 def save_notes(notes, callback=None):
     def _run():
-        result = _request({"action": "save", "notes": notes})
-        if callback:
-            callback(result)
+        try:
+            payload = json.dumps({
+                "files": {
+                    "notes.json": {
+                        "content": json.dumps({"notes": notes}, ensure_ascii=False)
+                    }
+                }
+            }).encode("utf-8")
+            req = urllib.request.Request(GIST_API, data=payload, headers=_headers(), method="PATCH")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+            if callback:
+                callback(True)
+        except Exception as e:
+            print("notes save hatası:", e)
+            if callback:
+                callback(None)
     threading.Thread(target=_run, daemon=True).start()

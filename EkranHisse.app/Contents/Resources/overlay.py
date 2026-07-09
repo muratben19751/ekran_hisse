@@ -1,21 +1,24 @@
 import json
 import os
 
-from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QRect, Signal
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QInputDialog, QApplication, QSizePolicy, QFrame, QMenu,
+    QPushButton, QInputDialog, QApplication, QSizePolicy, QMenu,
+    QStackedWidget,
 )
 
 from data_fetcher import fetch_all
+from notes_panel import NotesPanel
 
 STOCKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
 REFRESH_INTERVAL_MS = 60_000
 
-PANEL_W  = 285
-TAB_W    = 32
-ANIM_MS  = 200
+STOCKS_PANEL_W = 285
+NOTES_PANEL_W  = 320
+TAB_W          = 32
+ANIM_MS        = 200
 
 BG_COLOR     = "rgba(18, 18, 22, 230)"
 HEADER_COLOR = "#666666"
@@ -24,13 +27,14 @@ NEG_COLOR    = "#f87171"
 NEU_COLOR    = "#e2e8f0"
 BTN_HOVER    = "rgba(255,255,255,40)"
 
+TAB_STOCK_COLOR = "rgba(60, 120, 255, 220)"   # mavi — hisse
+TAB_NOTES_COLOR = "rgba(60, 180, 100, 220)"   # yeşil — notlar
+
 
 def _main_screen():
-    """En soldaki (veya tek) ekranı döndür — macOS'ta ana ekran budur."""
     screens = QApplication.screens()
     if not screens:
         return QApplication.primaryScreen().availableGeometry()
-    # En küçük x koordinatlı ekran = en solda = macOS main screen
     primary = min(screens, key=lambda s: s.geometry().x())
     return primary.availableGeometry()
 
@@ -112,88 +116,17 @@ class StockRow(QWidget):
             self.lbl_change.setStyleSheet(f"color: {NEU_COLOR};")
 
 
-class OverlayWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self._is_open  = False
+class StockWidget(QWidget):
+    """Hisse panelinin içeriği (BIST listesi)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self._fetching = False
-        self.symbols   = load_stocks()
-        self.rows      = {}
+        self.symbols = load_stocks()
+        self.rows = {}
 
-        sc = _main_screen()
-        self._sc = sc
-
-        self.setWindowFlags(
-            Qt.FramelessWindowHint |
-            Qt.WindowStaysOnTopHint |
-            Qt.NoDropShadowWindowHint
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground)
-
-        self._build_ui()
-        self._rebuild_rows()
-
-        # Pencereyi sağa yerleştir — sadece sekme görünür
-        self._reposition()
-
-        # Panel genişliği animasyonu
-        self._anim = QPropertyAnimation(self.panel, b"maximumWidth")
-        self._anim.setDuration(ANIM_MS)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-
-        self.panel.setMaximumWidth(0)
-
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._refresh)
-        self.timer.start(REFRESH_INTERVAL_MS)
-
-        if self.symbols:
-            self._refresh()
-
-    def _reposition(self):
-        self._sc = _main_screen()
-        sc = self._sc
-        self.adjustSize()
-        # Pencereyi tam sağa yapıştır; sadece sekme görünür
-        x = sc.x() + sc.width() - TAB_W
-        y = sc.y() + (sc.height() - self.height()) // 2
-        self.move(x, y)
-
-    def _build_ui(self):
-        root = QHBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # Sol: sekme (her zaman görünür)
-        self.tab = QWidget()
-        self.tab.setFixedWidth(TAB_W)
-        self.tab.setObjectName("tab")
-        self.tab.setStyleSheet(
-            "#tab {"
-            "  background: rgba(60, 120, 255, 220);"
-            "  border-top-left-radius: 8px;"
-            "  border-bottom-left-radius: 8px;"
-            "  border: 1px solid rgba(255,255,255,30);"
-            "  border-right: none;"
-            "}"
-        )
-        self.tab.setCursor(Qt.PointingHandCursor)
-        tab_layout = QVBoxLayout(self.tab)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        self.arrow = QLabel("◀")
-        self.arrow.setFont(QFont("Arial", 12, QFont.Bold))
-        self.arrow.setStyleSheet("color: white; background: transparent;")
-        self.arrow.setAlignment(Qt.AlignCenter)
-        tab_layout.addWidget(self.arrow)
-
-        # Sekmeye tıklama (sol: toggle, sağ: çıkış menüsü)
-        self.tab.mousePressEvent = self._tab_mouse_press
-
-        # Sağ: içerik paneli (genişliği animasyonla değişir)
-        self.panel = QWidget()
-        self.panel.setObjectName("panel")
-        self.panel.setStyleSheet(
-            "#panel {"
+        self.setObjectName("stockwidget")
+        self.setStyleSheet(
+            "#stockwidget {"
             f"  background: {BG_COLOR};"
             "  border-top-right-radius: 8px;"
             "  border-bottom-right-radius: 8px;"
@@ -201,13 +134,12 @@ class OverlayWindow(QWidget):
             "  border-left: none;"
             "}"
         )
-        self.panel.setFixedWidth(PANEL_W)
+        self.setFixedWidth(STOCKS_PANEL_W)
 
-        pnl = QVBoxLayout(self.panel)
+        pnl = QVBoxLayout(self)
         pnl.setContentsMargins(0, 8, 0, 8)
         pnl.setSpacing(0)
 
-        # Başlık
         hdr = QHBoxLayout()
         hdr.setContentsMargins(10, 2, 10, 6)
         lbl_title = QLabel("BIST Hisse")
@@ -234,18 +166,21 @@ class OverlayWindow(QWidget):
         self.lbl_empty.setContentsMargins(10, 10, 10, 10)
         pnl.addWidget(self.lbl_empty)
 
-        # Butonlar
         bar = QHBoxLayout()
         bar.setContentsMargins(8, 6, 8, 2)
         bar.setSpacing(4)
         bar.addWidget(self._btn("+", self._add_stock))
-        bar.addWidget(self._btn("↺", self._refresh))
+        bar.addWidget(self._btn("↺", self.refresh))
         bar.addStretch()
-        bar.addWidget(self._btn("✕", self._toggle))  # paneli kapat (sekmeye dön)
         pnl.addLayout(bar)
 
-        root.addWidget(self.tab)
-        root.addWidget(self.panel)
+        self._rebuild_rows()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(REFRESH_INTERVAL_MS)
+        if self.symbols:
+            self.refresh()
 
     def _btn(self, text, slot):
         b = QPushButton(text)
@@ -270,8 +205,6 @@ class OverlayWindow(QWidget):
             self.rows_layout.addWidget(row)
             self.rows[sym] = row
         self.lbl_empty.setVisible(len(self.symbols) == 0)
-        # Yükseklik değişince konumu güncelle
-        QTimer.singleShot(10, self._reposition)
 
     def _add_stock(self):
         text, ok = QInputDialog.getText(self, "Hisse Ekle", "BIST sembolü (örn: THYAO):")
@@ -283,7 +216,7 @@ class OverlayWindow(QWidget):
         self.symbols.append(sym)
         save_stocks(self.symbols)
         self._rebuild_rows()
-        self._refresh()
+        self.refresh()
 
     def _remove_stock(self, symbol):
         if symbol in self.symbols:
@@ -291,7 +224,7 @@ class OverlayWindow(QWidget):
             save_stocks(self.symbols)
             self._rebuild_rows()
 
-    def _refresh(self):
+    def refresh(self):
         if not self.symbols or self._fetching:
             return
         self._fetching = True
@@ -306,29 +239,161 @@ class OverlayWindow(QWidget):
             if sym in self.rows:
                 self.rows[sym].update_data(item["price"], item["change_pct"])
 
-    def _tab_mouse_press(self, event):
-        if event.button() == Qt.RightButton:
-            menu = QMenu(self)
-            menu.setStyleSheet(
-                "QMenu { background: rgba(28,28,36,240); color: #ccc; border: 1px solid rgba(255,255,255,20); border-radius: 6px; }"
-                "QMenu::item:selected { background: rgba(255,255,255,25); }"
-            )
-            menu.addAction("Uygulamayı Kapat", QApplication.instance().quit)
-            menu.exec(event.globalPosition().toPoint())
-        else:
-            self._toggle()
 
-    def _toggle(self):
-        self._is_open = not self._is_open
-        self.arrow.setText("▶" if self._is_open else "◀")
+class OverlayWindow(QWidget):
+    # 0 = kapalı, 1 = hisse, 2 = notlar
+    def __init__(self):
+        super().__init__()
+        self._mode = 0   # 0=kapalı, 1=hisse, 2=notlar
 
+        self.setWindowFlags(
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.NoDropShadowWindowHint
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        self._build_ui()
+        self._reposition()
+
+        # Panel animasyonu (maximumWidth üzerinden)
+        self._anim = QPropertyAnimation(self.stack, b"maximumWidth")
+        self._anim.setDuration(ANIM_MS)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.stack.setMaximumWidth(0)
+
+    # ── Konum ──────────────────────────────────────────────────────────
+    def _reposition(self):
         sc = _main_screen()
-        self._sc = sc
-        # Pencereyi sağa kaydır; açıksa panel genişliği kadar sola git
-        target_x = sc.x() + sc.width() - TAB_W - (PANEL_W if self._is_open else 0)
+        self.adjustSize()
+        x = sc.x() + sc.width() - TAB_W
+        y = sc.y() + (sc.height() - self.height()) // 2
+        self.move(x, y)
+
+    # ── UI İnşası ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Sekme sütunu (iki sekme üst üste) ─────────────────────────
+        self.tab_col = QWidget()
+        self.tab_col.setFixedWidth(TAB_W)
+        tab_col_layout = QVBoxLayout(self.tab_col)
+        tab_col_layout.setContentsMargins(0, 0, 0, 0)
+        tab_col_layout.setSpacing(4)
+
+        # Hisse sekmesi (mavi, ◀ ok)
+        self.tab_stock = self._make_tab("◀", TAB_STOCK_COLOR, top=True)
+        self.tab_stock.mousePressEvent = self._stock_tab_press
+
+        # Notlar sekmesi (yeşil, N)
+        self.tab_notes = self._make_tab("N", TAB_NOTES_COLOR, top=False)
+        self.tab_notes.mousePressEvent = self._notes_tab_press
+
+        tab_col_layout.addWidget(self.tab_stock)
+        tab_col_layout.addWidget(self.tab_notes)
+        tab_col_layout.addStretch()
+
+        # ── İçerik yığını ─────────────────────────────────────────────
+        self.stack = QStackedWidget()
+        self.stack.setMaximumWidth(0)   # başlangıçta gizli
+
+        self.stock_widget = StockWidget()
+        self.notes_widget = NotesPanel()
+
+        self.stack.addWidget(self.stock_widget)   # index 0
+        self.stack.addWidget(self.notes_widget)   # index 1
+
+        root.addWidget(self.tab_col)
+        root.addWidget(self.stack)
+
+    def _make_tab(self, label, color, top):
+        tab = QWidget()
+        tab.setFixedWidth(TAB_W)
+        tab.setMinimumHeight(44)
+        tab.setCursor(Qt.PointingHandCursor)
+        radius = (
+            "border-top-left-radius: 8px; border-bottom-left-radius: 8px;"
+            if top else
+            "border-top-left-radius: 6px; border-bottom-left-radius: 6px;"
+        )
+        tab.setObjectName(f"tab_{label}")
+        tab.setStyleSheet(
+            f"QWidget#{tab.objectName()} {{"
+            f"  background: {color};"
+            f"  {radius}"
+            "  border: 1px solid rgba(255,255,255,30);"
+            "  border-right: none;"
+            "}"
+        )
+        lyt = QVBoxLayout(tab)
+        lyt.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label)
+        lbl.setFont(QFont("Arial", 11, QFont.Bold))
+        lbl.setStyleSheet("color: white; background: transparent;")
+        lbl.setAlignment(Qt.AlignCenter)
+        lyt.addWidget(lbl)
+        tab._label = lbl
+        return tab
+
+    # ── Sekme olayları ─────────────────────────────────────────────────
+    def _stock_tab_press(self, event):
+        if event.button() == Qt.RightButton:
+            self._show_quit_menu(event)
+        else:
+            self._open_panel(1)
+
+    def _notes_tab_press(self, event):
+        if event.button() == Qt.RightButton:
+            self._show_quit_menu(event)
+        else:
+            self._open_panel(2)
+
+    def _show_quit_menu(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background: rgba(28,28,36,240); color: #ccc;"
+            " border: 1px solid rgba(255,255,255,20); border-radius: 6px; }"
+            "QMenu::item:selected { background: rgba(255,255,255,25); }"
+        )
+        menu.addAction("Uygulamayı Kapat", QApplication.instance().quit)
+        menu.exec(event.globalPosition().toPoint())
+
+    # ── Panel açma/kapama ──────────────────────────────────────────────
+    def _open_panel(self, mode):
+        sc = _main_screen()
+
+        if self._mode == mode:
+            # Aynı sekmeye basıldı → kapat
+            self._mode = 0
+            self.tab_stock._label.setText("◀")
+            target_w = 0
+            target_x = sc.x() + sc.width() - TAB_W
+        else:
+            # Farklı sekme veya kapalıyken açıyoruz
+            self._mode = mode
+            if mode == 1:
+                self.stack.setCurrentIndex(0)
+                panel_w = STOCKS_PANEL_W
+                self.tab_stock._label.setText("▶")
+                self.tab_notes._label.setText("N")
+            else:
+                self.stack.setCurrentIndex(1)
+                panel_w = NOTES_PANEL_W
+                self.tab_stock._label.setText("◀")
+                self.tab_notes._label.setText("◀")
+
+            target_w = panel_w
+            target_x = sc.x() + sc.width() - TAB_W - panel_w
+
         self.move(target_x, self.y())
 
         self._anim.stop()
-        self._anim.setStartValue(self.panel.width())
-        self._anim.setEndValue(PANEL_W if self._is_open else 0)
+        self._anim.setStartValue(self.stack.width())
+        self._anim.setEndValue(target_w)
         self._anim.start()
+
+    # ── Veri ──────────────────────────────────────────────────────────
+    def apply_data(self, results):
+        self.stock_widget.apply_data(results)

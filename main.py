@@ -1,8 +1,29 @@
 import sys
 import os
+import fcntl
+import atexit
 
 # Script'in bulunduğu dizini path'e ekle; numpy çakışmasını önle
 _here = os.path.dirname(os.path.abspath(__file__))
+
+# Tek instance kilidi
+_lock_file = os.path.join(_here, ".ekranhisse.lock")
+_lock_fd = open(_lock_file, "w")
+try:
+    fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except IOError:
+    print("EkranHisse zaten çalışıyor.")
+    sys.exit(0)
+
+def _cleanup_lock():
+    try:
+        fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+        _lock_fd.close()
+        os.unlink(_lock_file)
+    except Exception:
+        pass
+
+atexit.register(_cleanup_lock)
 if _here not in sys.path:
     sys.path.insert(0, _here)
 # numpy kaynak ağacı çakışmasını önle
@@ -15,7 +36,8 @@ from overlay import OverlayWindow
 
 
 class _AppSignals(QObject):
-    data_signal = Signal(list)
+    data_signal  = Signal(list)
+    notes_signal = Signal(object)  # None veya list
 
 
 def _set_window_level(window):
@@ -40,10 +62,12 @@ def main():
     app.setQuitOnLastWindowClosed(False)
 
     signals = _AppSignals()
-    app.data_signal = signals.data_signal
+    app.data_signal  = signals.data_signal
+    app.notes_signal = signals.notes_signal
 
     window = OverlayWindow()
     signals.data_signal.connect(window.apply_data)
+    signals.notes_signal.connect(window.apply_notes)
     window.show()
 
     # Başlangıçta ve sonra her 2 saniyede bir level'i yenile

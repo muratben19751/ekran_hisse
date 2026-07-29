@@ -8,7 +8,7 @@ import json
 import os
 
 from PySide6.QtCore import (
-    Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint
+    Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint, QEvent
 )
 from PySide6.QtGui import QFont, QPainter, QColor, QDrag, QPixmap
 from PySide6.QtWidgets import (
@@ -673,6 +673,7 @@ class OverlayWindow(QWidget):
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
+        QApplication.instance().installEventFilter(self)
 
         self._build_ui()
 
@@ -697,6 +698,10 @@ class OverlayWindow(QWidget):
         if self.stocks:
             self._stocks_refresh()
         QTimer.singleShot(1000, self._notes_load)
+        QTimer.singleShot(500, self._install_global_mouse_monitor)
+        self._outside_click_timer = QTimer(self)
+        self._outside_click_timer.timeout.connect(self._check_outside_click)
+        self._outside_click_timer.start(100)
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -981,7 +986,61 @@ class OverlayWindow(QWidget):
         self._anim.setEndValue(target_w)
         self._anim.start()
 
-    # ── Liste kurulumu ──────────────────────────────────────────────────
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowDeactivate and self._mode != 0:
+            self._toggle(self._mode)
+        super().changeEvent(event)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress and self._mode != 0:
+            gp = event.globalPosition().toPoint()
+            if not self.geometry().contains(gp):
+                self._toggle(self._mode)
+        return super().eventFilter(obj, event)
+
+    def _install_global_mouse_monitor(self):
+        try:
+            from AppKit import NSEvent
+            mask = (1 << 1) | (1 << 3)  # NSLeftMouseDown | NSRightMouseDown
+
+            def handler(nsevent):
+                if self._mode == 0:
+                    return
+                from AppKit import NSScreen
+                loc = NSEvent.mouseLocation()
+                sh = NSScreen.mainScreen().frame().size.height
+                gx = int(loc.x)
+                gy = int(sh - loc.y)
+                from PySide6.QtCore import QPoint
+                if not self.geometry().contains(QPoint(gx, gy)):
+                    QTimer.singleShot(0, lambda m=self._mode: self._toggle(m) if self._mode != 0 else None)
+
+            self._ns_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
+        except Exception as e:
+            print("global mouse monitor hatası:", e)
+
+    def _check_outside_click(self):
+        if self._mode == 0:
+            return
+        try:
+            from AppKit import NSEvent, NSScreen
+            buttons = NSEvent.pressedMouseButtons()
+            if not (buttons & 0b11):  # sol veya sağ buton basılı değil
+                self._was_pressed = False
+                return
+            if getattr(self, '_was_pressed', False):
+                return
+            self._was_pressed = True
+            loc = NSEvent.mouseLocation()
+            sh = NSScreen.mainScreen().frame().size.height
+            from PySide6.QtCore import QPoint
+            pt = QPoint(int(loc.x), int(sh - loc.y))
+            if not self.geometry().contains(pt):
+                self._toggle(self._mode)
+        except Exception:
+            pass
+
+
     def _clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)

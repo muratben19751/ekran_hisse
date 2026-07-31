@@ -248,6 +248,146 @@ class TextSheet(_SheetDialog):
         self.accept()
 
 
+_BIST_SYMBOLS = [
+    "ACSEL","ADEL","ADESE","AEFES","AFYON","AGESA","AGHOL","AGYO","AHGAZ","AHSGY",
+    "AKBNK","AKCNS","AKFGY","AKGRT","AKINM","AKSA","AKSEL","AKSEN","AKSGY","AKSUE",
+    "AKTIF","ALARK","ALBRK","ALFAS","ALGYO","ALKA","ALKIM","ALKLC","ALMAD","ALTNY",
+    "ANELE","ANGEN","ANHYT","ANSGR","ARASE","ARCLK","ARDYZ","ARENA","ARSAN","ARTMS",
+    "ARZUM","ASELS","ASGYO","ASTOR","ASUZU","ATAGY","ATAKP","ATATP","ATEKS","ATLAS",
+    "ATSYH","AVHOL","AVOD","AYCES","AYEN","AYES","AZTEK","BAGFS","BAKAB","BALAT",
+    "BANVT","BARMA","BASCM","BASGZ","BAYRK","BERA","BEYAZ","BFREN","BIMAS","BIOEN",
+    "BIZIM","BJKAS","BLCYT","BNTAS","BOSSA","BRISA","BRKO","BRKVY","BRMEN","BRSAN",
+    "BRYAT","BSOKE","BTCIM","BUCIM","BURCE","BURVA","BVSAN","CANTE","CASA","CCOLA",
+    "CELHA","CEMAS","CEMTS","CENTA","CIMSA","CLEBI","CMENT","CONSE","COSMO","CRFSA",
+    "CUSAN","CVKMD","CWENE","DAGHL","DAPGM","DARDL","DENGE","DERHL","DERIM","DESA",
+    "DESPC","DEVA","DGATE","DGGYO","DGNMO","DITAS","DJIST","DMSAS","DNISI","DOAS",
+    "DOBUR","DOCO","DOGUB","DOHOL","DOMCO","DOPA","DPAZR","DRDOC","DTRND","DURDO",
+    "DYOBY","DZGYO","EBEBK","EDATA","EDIP","EGEEN","EGEPO","EGGUB","EGPRO","EGSER",
+    "EKGYO","ELITE","EMKEL","EMNIS","ENDKS","ENERY","ENGYO","ENJSA","ENKAI","ENSRI",
+    "EPLAS","ERBOS","ERCB","ERDEM","ERDGD","EREGL","ERSU","ESCAR","ESCOM","ESEN",
+    "ETILR","ETYAT","EUHOL","EUPWR","EUREN","EUYO","EYGYO","FADE","FENER","FMIZP",
+    "FONET","FORMT","FORTE","FROTO","FZLGY","GARAN","GARFA","GEDIK","GEDZA","GENIL",
+    "GENTS","GEREL","GESAN","GLBMD","GLCVY","GLRYH","GLYHO","GMTAS","GOKNR","GOLTS",
+    "GOODY","GOZDE","GRSEL","GRTHO","GSDDE","GSDHO","GSRAY","GUBRF","GWIND","GZNMI",
+    "HALKB","HATEK","HDFGS","HEDEF","HEKTS","HLGYO","HTTBT","HUNER","HURGZ","ICBCT",
+    "ICUGS","IDEAS","IDGYO","IEYHO","IHEVA","IHGZT","IHLAS","IHLGM","IHYAY","IMASM",
+    "INDES","INFO","INTEM","INVEO","INVES","IPEKE","ISBIR","ISCTR","ISDMR","ISFIN",
+    "ISGSY","ISGYO","ISYAT","ITTFH","IZENR","IZFAS","IZINV","IZMDC","JANTS","KARMA",
+    "KARTN","KATMR","KAYSE","KBORU","KCAER","KCHOL","KENT","KERVN","KFEIN","KGYO",
+    "KLGYO","KLKIM","KLMSN","KLNMA","KLRHO","KLSER","KMPUR","KNFRT","KORDS","KOTON",
+    "KOZAA","KOZAL","KRDMA","KRDMB","KRDMD","KRGYO","KRONT","KRPLS","KRSTL","KRTEK",
+    "KRVGD","KSTUR","KTLEV","KTSKR","KUTPO","KUYAS","KVGYO","KZBGY","LIDER","LIDFA",
+    "LINK","LMKDC","LOGO","LRSHO","LUKSK","MAALT","MAGEN","MAKIM","MAKTK","MANAS",
+    "MARBL","MARKA","MARTI","MAVI","MEDTR","MEGAP","MEGMT","MEKAG","MEPET","MERCN",
+    "MERIT","MERKO","METRO","METUR","MGROS","MHRGY","MIPAZ","MMCAS","MNDRS","MNDTR",
+    "MOBTL","MOGAN","MSGYO","MTRKS","MTRYO","MZHLD","NATEN","NETAS","NIBAS","NTGAZ",
+    "NTHOL","NUGYO","NUHCM","OBAMS","OBASE","ODAS","ODINE","OFSYM","OKCYM","ONCSM",
+    "ONUR","ORGE","ORMA","OSMEN","OSTIM","OTKAR","OYAKC","OYAYO","OYLUM","OZGYO",
+    "OZKGY","OZRDN","OZSUB","PAGYO","PAMEL","PAPIL","PCILT","PDPAS","PEGYO","PEKGY",
+    "PENGD","PENTA","PETKM","PETUN","PGSUS","PINSU","PKART","PNLSN","POLHO","POLTK",
+    "PRKAB","PRKME","PRZMA","PSDTC","PSGYO","PTOFS","PTHOL","RAKSN","RALYH","RAYSG",
+    "RHEAG","RNPOL","RODRG","RTALB","RUBNS","RYGYO"," RYSMAN","SAFKR","SAGYO","SAHOL",
+    "SANEL","SANFM","SANKO","SARKY","SASA","SAYAS","SDTTR","SEGMN","SEGYO","SEKFK",
+    "SEKUR","SELEC","SELGD","SELVA","SEYKM","SILVR","SISE","SKBNK","SKTAS","SKYMD",
+    "SMRTG","SNGYO","SNKRN","SODSN","SOKM","SONME","SRVGY","SUMAS","SUNEKS","SUWEN",
+    "TABGD","TATEN","TATGD","TAVHL","TBORG","TCELL","TDGYO","TEKTU","TERA","TEZOL",
+    "TGSAS","THYAO","TIRE","TKNSA","TKURU","TMSN","TOASO","TRCAS","TRGYO","TRILC",
+    "TSPOR","TTKOM","TTRAK","TUCLK","TURGZ","TURSG","TZNGY","ULUFA","ULUSE","ULUUN",
+    "UMPAS","UNLU","UNYEC","USAK","UZERB","VAKBN","VAKFN","VAKKO","VBTYZ","VERTU",
+    "VERUS","VESBE","VESTEL","VKGYO","VKFYO","VRGYO","WNDYR","XTCRT","XU030","XU050",
+    "XU100","XBANK","XBLSM","XGIDA","XHOLD","XKMYA","XKURY","XMANA","XMESY","XSGRT",
+    "XSPOR","XTEKS","XTRZM","XTUFE","XUMAL","XUSIN","XUTEK","XTCRT","XUHIZ","XAUUSD",
+    "YATAS","YBTAS","YKBK","YKSLN","YUNSA","YYLGD","ZEDUR","ZOREN","ZORLU",
+]
+
+
+class StockPickerSheet(_SheetDialog):
+    """Hisse ekleme — yazarken filtreli liste."""
+
+    def __init__(self, existing=None, parent=None):
+        super().__init__(parent)
+        self._existing = {s.upper() for s in (existing or [])}
+        self.value = None
+
+        head = QLabel("Hisse ekle")
+        head.setFont(_f(13, QFont.DemiBold))
+        head.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+        self.lay.addWidget(head)
+
+        self.inp = QLineEdit()
+        self.inp.setFont(_f(13))
+        self.inp.setFixedHeight(28)
+        self.inp.setPlaceholderText("Sembol yaz… (örn. THYAO)")
+        self.inp.setStyleSheet(
+            f"QLineEdit {{ background: {C_FIELD}; border: 1px solid {C_BORDER};"
+            f" border-radius: {R_BTN}px; color: {C_TEXT}; padding: 0 9px; }}"
+            f"QLineEdit:focus {{ border-color: {C_BLUE}; }}"
+        )
+        self.lay.addWidget(self.inp)
+
+        self.lst = QListWidget()
+        self.lst.setFixedHeight(160)
+        self.lst.setFont(_f(12))
+        self.lst.setStyleSheet(
+            f"QListWidget {{ background: {C_FIELD}; border: 1px solid {C_BORDER};"
+            f" border-radius: {R_BTN}px; color: {C_TEXT}; outline: none; }}"
+            f"QListWidget::item {{ padding: 4px 9px; }}"
+            f"QListWidget::item:selected {{ background: {C_BLUE}; color: #fff; border-radius: 4px; }}"
+            f"QListWidget::item:hover:!selected {{ background: rgba(255,255,255,18); }}"
+        )
+        self.lay.addWidget(self.lst)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        bar.addStretch()
+        cancel = _pill("İptal")
+        ok = _pill("Ekle", primary=True)
+        bar.addWidget(cancel)
+        bar.addWidget(ok)
+        self.lay.addLayout(bar)
+
+        self.inp.textChanged.connect(self._filter)
+        self.inp.returnPressed.connect(self._ok)
+        self.lst.itemDoubleClicked.connect(self._ok)
+        self.lst.itemClicked.connect(lambda item: self.inp.setText(item.text()))
+        ok.clicked.connect(self._ok)
+        cancel.clicked.connect(self.reject)
+
+        self._filter("")
+        self._place(260, 290)
+        self.inp.setFocus()
+
+    def _filter(self, text):
+        q = text.strip().upper()
+        self.lst.clear()
+        for sym in _BIST_SYMBOLS:
+            if sym in self._existing:
+                continue
+            if not q or sym.startswith(q):
+                self.lst.addItem(sym)
+        if self.lst.count() > 0:
+            self.lst.setCurrentRow(0)
+
+    def _ok(self):
+        selected = self.lst.currentItem()
+        typed = self.inp.text().strip().upper()
+        self.value = selected.text() if selected else typed
+        if self.value:
+            self.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Down:
+            row = self.lst.currentRow()
+            if row < self.lst.count() - 1:
+                self.lst.setCurrentRow(row + 1)
+        elif event.key() == Qt.Key_Up:
+            row = self.lst.currentRow()
+            if row > 0:
+                self.lst.setCurrentRow(row - 1)
+        else:
+            super().keyPressEvent(event)
+
+
 class TargetSheet(_SheetDialog):
     """Giriş + çıkış hedefi tek sheet'te (result: ('save', e, x) | ('clear',) | None)."""
 
@@ -1313,7 +1453,8 @@ class OverlayWindow(QWidget):
 
     # ── Hisse işlemleri ─────────────────────────────────────────────────
     def _add_stock(self):
-        dlg = TextSheet("Hisse ekle", "BIST sembolü (örn. THYAO)", parent=self)
+        existing = [s["symbol"] for s in self.stocks]
+        dlg = StockPickerSheet(existing=existing, parent=self)
         dlg.exec()
         sym = (dlg.value or "").upper()
         if not sym or any(s["symbol"] == sym for s in self.stocks):

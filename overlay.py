@@ -803,6 +803,10 @@ class OverlayWindow(QWidget):
         self._collapsed_sections = {}
         self._filter = ""
 
+        self._twitter_known_ids = set()
+        self._twitter_alert = False
+        self._twitter_blink_state = False
+
         self._notes = []
         self._current_note = None
         self._save_timer = QTimer(self)
@@ -842,6 +846,14 @@ class OverlayWindow(QWidget):
         self._outside_click_timer = QTimer(self)
         self._outside_click_timer.timeout.connect(self._check_outside_click)
         self._outside_click_timer.start(100)
+
+        self._twitter_poll_timer = QTimer(self)
+        self._twitter_poll_timer.timeout.connect(self._twitter_poll)
+        self._twitter_poll_timer.start(60_000)
+
+        self._twitter_blink_timer = QTimer(self)
+        self._twitter_blink_timer.timeout.connect(self._twitter_blink_tick)
+        self._twitter_blink_timer.start(600)
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -909,16 +921,26 @@ class OverlayWindow(QWidget):
         self._paint_tab(tab, False)
         return tab
 
-    def _paint_tab(self, tab, active):
-        bg = C_BLUE if active else "rgba(48, 48, 50, 214)"
-        border = "none" if active else f"1px solid {C_BORDER}"
+    def _paint_tab(self, tab, active, alert=False):
+        if alert:
+            bg = "#c0392b" if self._twitter_blink_state else "rgba(48,48,50,214)"
+            border = "none"
+        else:
+            bg = C_BLUE if active else "rgba(48, 48, 50, 214)"
+            border = "none" if active else f"1px solid {C_BORDER}"
         tab.setStyleSheet(
             f"#{tab.objectName()} {{ background: {bg}; border: {border}; border-right: none;"
             f" border-top-left-radius: {R_TAB}px; border-bottom-left-radius: {R_TAB}px; }}"
         )
         tab._label.setStyleSheet(
-            f"color: {'#ffffff' if active else C_TEXT2}; background: transparent;"
+            f"color: {'#ffffff' if (active or alert) else C_TEXT2}; background: transparent;"
         )
+
+    def _twitter_blink_tick(self):
+        if not self._twitter_alert:
+            return
+        self._twitter_blink_state = not self._twitter_blink_state
+        self._paint_tab(self.tab_twitter, self._mode == 3, alert=True)
 
     def _title_row(self, title):
         w = QWidget()
@@ -1180,6 +1202,13 @@ class OverlayWindow(QWidget):
             tweets = data.get("data", [])
             users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
 
+            # Yeni tweet tespiti — ilk yüklemede sadece seed et, sonraki polling'de alert aç
+            incoming_ids = {tw.get("id", "") for tw in tweets}
+            if self._twitter_known_ids:
+                new_ids = incoming_ids - self._twitter_known_ids
+                if new_ids and self._mode != 3:
+                    self._twitter_alert = True
+            self._twitter_known_ids = incoming_ids
             if not tweets:
                 lbl = QLabel("Tweet bulunamadı.")
                 lbl.setFont(_f(12))
@@ -1246,6 +1275,39 @@ class OverlayWindow(QWidget):
             err.setWordWrap(True)
             self.twitter_layout.addWidget(err)
 
+    def _twitter_poll(self):
+        """Arka planda sessizce kontrol et; yeni tweet varsa alert aç."""
+        import urllib.request, urllib.parse, urllib.error, json as _json
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
+        token = ""
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.startswith("TWITTER_BEARER_TOKEN="):
+                        token = line.split("=", 1)[1].strip()
+        if not token:
+            return
+        try:
+            query = urllib.parse.quote("TTKOM lang:tr -is:retweet")
+            url = (
+                f"https://api.twitter.com/2/tweets/search/recent"
+                f"?query={query}&max_results=10"
+                f"&tweet.fields=id"
+            )
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+            incoming_ids = {tw.get("id", "") for tw in data.get("data", [])}
+            if self._twitter_known_ids:
+                new_ids = incoming_ids - self._twitter_known_ids
+                if new_ids and self._mode != 3:
+                    self._twitter_alert = True
+                    self._twitter_known_ids = incoming_ids
+            else:
+                self._twitter_known_ids = incoming_ids
+        except Exception:
+            pass
+
     # ── Panel aç/kapat ──────────────────────────────────────────────────
     def _quit_menu(self, event):
         m = _menu(self)
@@ -1269,6 +1331,9 @@ class OverlayWindow(QWidget):
                 self._notes_load()
             if mode == 3 and prev == 0:
                 self._twitter_load()
+            if mode == 3:
+                self._twitter_alert = False
+                self._twitter_blink_state = False
             target_w = PANEL_W
         self._paint_tab(self.tab_stock, self._mode == 1)
         self._paint_tab(self.tab_notes, self._mode == 2)

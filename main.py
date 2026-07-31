@@ -40,19 +40,22 @@ class _AppSignals(QObject):
     notes_signal = Signal(object)  # None veya list
 
 
+try:
+    from AppKit import NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary
+    _COLLECTION_BEHAVIOR = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary
+except Exception:
+    _COLLECTION_BEHAVIOR = None
+
+
 def _set_window_level(window):
     try:
         import objc
         ns_view = objc.objc_object(c_void_p=int(window.winId()))
         ns_win = ns_view.window()
-        # NSScreenSaverWindowLevel = 1000, biz 1001 yapıyoruz — her şeyin üstü
         ns_win.setLevel_(1001)
         ns_win.setHidesOnDeactivate_(False)
-        from AppKit import NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorStationary
-        ns_win.setCollectionBehavior_(
-            NSWindowCollectionBehaviorCanJoinAllSpaces |
-            NSWindowCollectionBehaviorStationary
-        )
+        if _COLLECTION_BEHAVIOR is not None:
+            ns_win.setCollectionBehavior_(_COLLECTION_BEHAVIOR)
     except Exception as e:
         print("window level hatası:", e)
 
@@ -76,8 +79,8 @@ def main():
 
     keep_top = QTimer()
     keep_top.timeout.connect(lambda: _set_window_level(window))
-    keep_top.start(200)  # 200ms'de bir yenile
-    app._keep_top = keep_top  # garbage collection'dan koru
+    keep_top.start(2000)
+    app._keep_top = keep_top
 
     sys.exit(app.exec())
 

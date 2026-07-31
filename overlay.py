@@ -6,6 +6,17 @@ Sadece bu dosya eski overlay.py'nin yerine kopyalanır.
 
 import json
 import os
+import subprocess
+import threading
+import urllib.request
+import urllib.parse
+import urllib.error
+
+try:
+    from AppKit import NSEvent as _NSEvent, NSScreen as _NSScreen
+    _APPKIT_OK = True
+except Exception:
+    _APPKIT_OK = False
 
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint, QEvent
@@ -66,10 +77,17 @@ _SEP_SYMBOL = "---"
 
 
 # ── Yardımcılar ─────────────────────────────────────────────────────────────
+_font_cache: dict = {}
+
 def _f(size, weight=QFont.Normal):
-    f = QFont()          # macOS sistem yazı tipi (SF)
-    f.setPointSize(size)
-    f.setWeight(weight)
+    key = (size, weight)
+    f = _font_cache.get(key)
+    if f is None:
+        f = QFont()
+        f.setPointSize(size)
+        f.setWeight(weight)
+        _font_cache[key] = f
+    return f
     return f
 
 
@@ -845,7 +863,7 @@ class OverlayWindow(QWidget):
         QTimer.singleShot(500, self._install_global_mouse_monitor)
         self._outside_click_timer = QTimer(self)
         self._outside_click_timer.timeout.connect(self._check_outside_click)
-        self._outside_click_timer.start(100)
+        self._outside_click_timer.start(150)
 
         self._twitter_poll_timer = QTimer(self)
         self._twitter_poll_timer.timeout.connect(self._twitter_poll)
@@ -1167,7 +1185,6 @@ class OverlayWindow(QWidget):
         return page
 
     def _twitter_load(self):
-        import urllib.request, urllib.parse, urllib.error
         self.lbl_twitter_status.setText("yükleniyor…")
         for i in reversed(range(self.twitter_layout.count())):
             w = self.twitter_layout.itemAt(i).widget()
@@ -1196,8 +1213,7 @@ class OverlayWindow(QWidget):
             )
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
             with urllib.request.urlopen(req, timeout=10) as resp:
-                import json as _json
-                data = _json.loads(resp.read().decode())
+                data = json.loads(resp.read().decode())
 
             tweets = data.get("data", [])
             users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
@@ -1227,7 +1243,7 @@ class OverlayWindow(QWidget):
                     f"QWidget {{ background: rgba(255,255,255,18); border-radius: {R_CARD}px; }}"
                     f"QWidget:hover {{ background: rgba(255,255,255,30); }}"
                 )
-                card.mousePressEvent = (lambda e, u=tweet_url: __import__('subprocess').Popen(['open', u]))
+                card.mousePressEvent = (lambda e, u=tweet_url: subprocess.Popen(['open', u]))
                 cv = QVBoxLayout(card)
                 cv.setContentsMargins(10, 8, 10, 8)
                 cv.setSpacing(4)
@@ -1277,7 +1293,9 @@ class OverlayWindow(QWidget):
 
     def _twitter_poll(self):
         """Arka planda sessizce kontrol et; yeni tweet varsa alert aç."""
-        import urllib.request, urllib.parse, urllib.error, json as _json
+        threading.Thread(target=self._twitter_poll_worker, daemon=True).start()
+
+    def _twitter_poll_worker(self):
         env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
         token = ""
         if os.path.exists(env_path):
@@ -1296,7 +1314,7 @@ class OverlayWindow(QWidget):
             )
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
             with urllib.request.urlopen(req, timeout=10) as resp:
-                data = _json.loads(resp.read().decode())
+                data = json.loads(resp.read().decode())
             incoming_ids = {tw.get("id", "") for tw in data.get("data", [])}
             if self._twitter_known_ids:
                 new_ids = incoming_ids - self._twitter_known_ids
@@ -1356,41 +1374,36 @@ class OverlayWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def _install_global_mouse_monitor(self):
+        if not _APPKIT_OK:
+            return
         try:
-            from AppKit import NSEvent
             mask = (1 << 1) | (1 << 3)  # NSLeftMouseDown | NSRightMouseDown
 
             def handler(nsevent):
                 if self._mode == 0:
                     return
-                from AppKit import NSScreen
-                loc = NSEvent.mouseLocation()
-                sh = NSScreen.mainScreen().frame().size.height
-                gx = int(loc.x)
-                gy = int(sh - loc.y)
-                from PySide6.QtCore import QPoint
-                if not self.geometry().contains(QPoint(gx, gy)):
+                loc = _NSEvent.mouseLocation()
+                sh = _NSScreen.mainScreen().frame().size.height
+                if not self.geometry().contains(QPoint(int(loc.x), int(sh - loc.y))):
                     QTimer.singleShot(0, lambda m=self._mode: self._toggle(m) if self._mode != 0 else None)
 
-            self._ns_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
+            self._ns_monitor = _NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
         except Exception as e:
             print("global mouse monitor hatası:", e)
 
     def _check_outside_click(self):
-        if self._mode == 0:
+        if self._mode == 0 or not _APPKIT_OK:
             return
         try:
-            from AppKit import NSEvent, NSScreen
-            buttons = NSEvent.pressedMouseButtons()
-            if not (buttons & 0b11):  # sol veya sağ buton basılı değil
+            buttons = _NSEvent.pressedMouseButtons()
+            if not (buttons & 0b11):
                 self._was_pressed = False
                 return
             if getattr(self, '_was_pressed', False):
                 return
             self._was_pressed = True
-            loc = NSEvent.mouseLocation()
-            sh = NSScreen.mainScreen().frame().size.height
-            from PySide6.QtCore import QPoint
+            loc = _NSEvent.mouseLocation()
+            sh = _NSScreen.mainScreen().frame().size.height
             pt = QPoint(int(loc.x), int(sh - loc.y))
             if not self.geometry().contains(pt):
                 self._toggle(self._mode)

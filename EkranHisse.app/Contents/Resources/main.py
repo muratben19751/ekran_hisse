@@ -15,7 +15,8 @@ from overlay import OverlayWindow
 
 
 class _AppSignals(QObject):
-    data_signal = Signal(list)
+    data_signal  = Signal(list)
+    notes_signal = Signal(object)  # None veya list
 
 
 def _set_window_level(window):
@@ -40,10 +41,12 @@ def main():
     app.setQuitOnLastWindowClosed(False)
 
     signals = _AppSignals()
-    app.data_signal = signals.data_signal
+    app.data_signal  = signals.data_signal
+    app.notes_signal = signals.notes_signal
 
     window = OverlayWindow()
     signals.data_signal.connect(window.apply_data)
+    signals.notes_signal.connect(window.apply_notes)
     window.show()
 
     # Başlangıçta ve sonra her 2 saniyede bir level'i yenile

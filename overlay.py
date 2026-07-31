@@ -716,9 +716,11 @@ class OverlayWindow(QWidget):
         tc.setSpacing(TAB_GAP)
         self.tab_stock = self._make_tab("◧", 1)
         self.tab_notes = self._make_tab("✎", 2)
+        self.tab_twitter = self._make_tab("𝕏", 3)
         tc.addStretch()
         tc.addWidget(self.tab_stock)
         tc.addWidget(self.tab_notes)
+        tc.addWidget(self.tab_twitter)
 
         self.panel = QWidget()
         self.panel.setObjectName("panel")
@@ -740,6 +742,9 @@ class OverlayWindow(QWidget):
         self.notes_page = self._build_notes_page()
         self.notes_page.setVisible(False)
         pnl.addWidget(self.notes_page)
+        self.twitter_page = self._build_twitter_page()
+        self.twitter_page.setVisible(False)
+        pnl.addWidget(self.twitter_page)
 
         root.addWidget(self.panel)
         root.addWidget(tab_col)
@@ -852,9 +857,10 @@ class OverlayWindow(QWidget):
         scroll.setWidget(self.host)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         scroll.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
-            "QScrollBar:vertical { background: transparent; width: 6px; }"
+            "QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
             "QScrollBar::handle:vertical { background: rgba(255,255,255,45);"
             " border-radius: 3px; min-height: 24px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
@@ -958,6 +964,148 @@ class OverlayWindow(QWidget):
         pnl.addWidget(bar)
         return page
 
+    def _build_twitter_page(self):
+        page = QWidget()
+        page.setStyleSheet(f"QWidget {{ background: {C_PANEL_BG}; }}")
+        pnl = QVBoxLayout(page)
+        pnl.setContentsMargins(0, 0, 0, 0)
+        pnl.setSpacing(0)
+
+        head, self.lbl_twitter_status = self._title_row("𝕏  TTKOM")
+        pnl.addWidget(head)
+
+        self.twitter_scroll = QScrollArea()
+        self.twitter_host = QWidget()
+        self.twitter_host.setStyleSheet("background: transparent;")
+        self.twitter_layout = QVBoxLayout(self.twitter_host)
+        self.twitter_layout.setContentsMargins(10, 6, 10, 10)
+        self.twitter_layout.setSpacing(8)
+        self.twitter_layout.setAlignment(Qt.AlignTop)
+        self.twitter_scroll.setWidget(self.twitter_host)
+        self.twitter_scroll.setWidgetResizable(True)
+        self.twitter_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.twitter_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.twitter_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: transparent; width: 6px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,45);"
+            " border-radius: 3px; min-height: 24px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
+        pnl.addWidget(self.twitter_scroll, 1)
+
+        bar = QWidget()
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(14, 0, 14, 12)
+        b_ref = _pill("↻ Yenile", width=70)
+        b_ref.clicked.connect(self._twitter_load)
+        bl.addStretch()
+        bl.addWidget(b_ref)
+        pnl.addWidget(bar)
+        return page
+
+    def _twitter_load(self):
+        import urllib.request, urllib.parse, urllib.error
+        self.lbl_twitter_status.setText("yükleniyor…")
+        for i in reversed(range(self.twitter_layout.count())):
+            w = self.twitter_layout.itemAt(i).widget()
+            if w:
+                w.deleteLater()
+
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
+        token = ""
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.startswith("TWITTER_BEARER_TOKEN="):
+                        token = line.split("=", 1)[1].strip()
+
+        if not token:
+            self.lbl_twitter_status.setText("token yok")
+            return
+
+        try:
+            query = urllib.parse.quote("TTKOM lang:tr -is:retweet")
+            url = (
+                f"https://api.twitter.com/2/tweets/search/recent"
+                f"?query={query}&max_results=10"
+                f"&tweet.fields=created_at,author_id,text"
+                f"&expansions=author_id&user.fields=username,name"
+            )
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                import json as _json
+                data = _json.loads(resp.read().decode())
+
+            tweets = data.get("data", [])
+            users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
+
+            if not tweets:
+                lbl = QLabel("Tweet bulunamadı.")
+                lbl.setFont(_f(12))
+                lbl.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+                self.twitter_layout.addWidget(lbl)
+                self.lbl_twitter_status.setText("0 tweet")
+                return
+
+            for tw in tweets:
+                tweet_id = tw.get("id", "")
+                tweet_url = f"https://twitter.com/i/web/status/{tweet_id}"
+
+                card = QWidget()
+                card.setCursor(Qt.PointingHandCursor)
+                card.setStyleSheet(
+                    f"QWidget {{ background: rgba(255,255,255,18); border-radius: {R_CARD}px; }}"
+                    f"QWidget:hover {{ background: rgba(255,255,255,30); }}"
+                )
+                card.mousePressEvent = (lambda e, u=tweet_url: __import__('subprocess').Popen(['open', u]))
+                cv = QVBoxLayout(card)
+                cv.setContentsMargins(10, 8, 10, 8)
+                cv.setSpacing(4)
+
+                user = users.get(tw.get("author_id", ""), {})
+                name = user.get("name", "")
+                uname = user.get("username", "")
+                ts = tw.get("created_at", "")[:16].replace("T", " ")
+
+                top = QHBoxLayout()
+                lbl_name = QLabel(f"@{uname}" if uname else name)
+                lbl_name.setFont(_f(11, QFont.Medium))
+                lbl_name.setStyleSheet(f"color: {C_BLUE}; background: transparent;")
+                lbl_ts = QLabel(ts)
+                lbl_ts.setFont(_f(10))
+                lbl_ts.setStyleSheet(f"color: rgba(235,235,245,128); background: transparent;")
+                top.addWidget(lbl_name)
+                top.addStretch()
+                top.addWidget(lbl_ts)
+                cv.addLayout(top)
+
+                lbl_text = QLabel(tw.get("text", ""))
+                lbl_text.setFont(_f(12))
+                lbl_text.setStyleSheet(f"color: #ffffff; background: transparent;")
+                lbl_text.setWordWrap(True)
+                lbl_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                cv.addWidget(lbl_text)
+
+                self.twitter_layout.addWidget(card)
+
+            self.lbl_twitter_status.setText(f"{len(tweets)} tweet")
+
+        except urllib.error.HTTPError as e:
+            self.lbl_twitter_status.setText(f"hata {e.code}")
+            err = QLabel(f"API hatası: {e.code}\n{e.reason}")
+            err.setFont(_f(12))
+            err.setStyleSheet(f"color: {C_RED}; background: transparent;")
+            err.setWordWrap(True)
+            self.twitter_layout.addWidget(err)
+        except Exception as e:
+            self.lbl_twitter_status.setText("hata")
+            err = QLabel(str(e))
+            err.setFont(_f(12))
+            err.setStyleSheet(f"color: {C_RED}; background: transparent;")
+            err.setWordWrap(True)
+            self.twitter_layout.addWidget(err)
+
     # ── Panel aç/kapat ──────────────────────────────────────────────────
     def _quit_menu(self, event):
         m = _menu(self)
@@ -974,13 +1122,17 @@ class OverlayWindow(QWidget):
             self._mode = mode
             self.stocks_page.setVisible(mode == 1)
             self.notes_page.setVisible(mode == 2)
+            self.twitter_page.setVisible(mode == 3)
             if mode == 1 and prev == 0:
                 self._stocks_refresh()
             if mode == 2 and prev == 0:
                 self._notes_load()
+            if mode == 3 and prev == 0:
+                self._twitter_load()
             target_w = PANEL_W
         self._paint_tab(self.tab_stock, self._mode == 1)
         self._paint_tab(self.tab_notes, self._mode == 2)
+        self._paint_tab(self.tab_twitter, self._mode == 3)
         self._anim.stop()
         self._anim.setStartValue(min(self.panel.maximumWidth(), PANEL_W))
         self._anim.setEndValue(target_w)

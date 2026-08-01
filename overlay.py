@@ -837,7 +837,7 @@ class GroupHeader(QWidget):
 
 class RowsHost(QWidget):
     """Sürükle-bırak sıralamayı kabul eden liste gövdesi."""
-    dropped = Signal(str, object)   # taşınan sembol, hedef sembol (None = sona)
+    dropped = Signal(str, object, bool)   # taşınan sembol, hedef sembol (None=sona), hedef_başlık_mı
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -853,13 +853,20 @@ class RowsHost(QWidget):
         self._order = order
 
     def _target_at(self, y):
+        """y konumundaki bırakma hedefini bul.
+
+        Döndürür: (sym, top_y, is_header). Görünür widget'lar arasında dikey
+        ortası y'nin altında kalan İLK widget hedeftir. is_header True ise
+        hedef bir bölüm başlığıdır (uid `---` ile başlar). Liste sonu →
+        (None, None, False).
+        """
         for sym, w in self._order:
             if not w.isVisible():
                 continue
             top_left = w.mapTo(self, QPoint(0, 0))
             if y < top_left.y() + w.height() / 2:
-                return sym, top_left.y()
-        return None, None
+                return sym, top_left.y(), sym.startswith(_SEP_SYMBOL)
+        return None, None, False
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasFormat(MIME_ROW):
@@ -869,9 +876,14 @@ class RowsHost(QWidget):
         if not e.mimeData().hasFormat(MIME_ROW):
             return
         y = int(e.position().y())
-        sym, top = self._target_at(y)
+        sym, top, is_header = self._target_at(y)
         if top is None:
             top = self.height() - 2
+        elif is_header:
+            # başlığa bırakınca çizgiyi başlığın ALT kenarına al → "bölüme giriyor"
+            w = next((w for s, w in self._order if s == sym), None)
+            if w is not None:
+                top = w.mapTo(self, QPoint(0, 0)).y() + w.height()
         self.indicator.setGeometry(10, max(0, top - 1), self.width() - 20, 2)
         self.indicator.raise_()
         self.indicator.show()
@@ -885,9 +897,9 @@ class RowsHost(QWidget):
         if not e.mimeData().hasFormat(MIME_ROW):
             return
         moved = bytes(e.mimeData().data(MIME_ROW)).decode()
-        target, _unused = self._target_at(int(e.position().y()))
+        target, _unused, is_header = self._target_at(int(e.position().y()))
         e.acceptProposedAction()
-        self.dropped.emit(moved, target)
+        self.dropped.emit(moved, target, is_header)
 
 
 # ── Ana pencere ─────────────────────────────────────────────────────────────
@@ -895,6 +907,8 @@ class OverlayWindow(QWidget):
     # Poll worker (arka plan thread) yeni tweet id'lerini bu sinyalle
     # ana thread'e iletir; UI/state değişikliği yalnızca ana thread'de olur.
     tw_poll_result = Signal(set)
+    # İlk yükleme (arka plan thread) sonucu: (tweets, users, hata_metni)
+    tw_load_result = Signal(object)
 
     def __init__(self, signals):
         super().__init__()
@@ -966,6 +980,7 @@ class OverlayWindow(QWidget):
         self._twitter_poll_timer.timeout.connect(self._twitter_poll)
         self._twitter_poll_timer.start(60_000)
         self.tw_poll_result.connect(self._twitter_poll_apply)
+        self.tw_load_result.connect(self._twitter_load_apply)
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -1502,13 +1517,20 @@ class OverlayWindow(QWidget):
         self._twitter_render()
 
     def _twitter_load(self):
-        from datetime import datetime
-        self.lbl_twitter_status.setText("yükleniyor…")
+        """Sekme açılışı — ağ çağrısı arka plan thread'de, UI bloke olmaz."""
         token = self._twitter_token()
         if not token:
             self._tw_tweets = []
             self._twitter_render()
             self.lbl_twitter_status.setText("token yok")
+            return
+        self.lbl_twitter_status.setText("yükleniyor…")
+        threading.Thread(target=self._twitter_load_worker, daemon=True).start()
+
+    def _twitter_load_worker(self):
+        """Arka plan thread — ağdan tweet çeker, sonucu sinyalle ana thread'e iletir."""
+        token = self._twitter_token()
+        if not token:
             return
         try:
             url = (
@@ -1520,31 +1542,39 @@ class OverlayWindow(QWidget):
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
-
-            self._tw_tweets = data.get("data", [])
-            self._tw_users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
-            incoming = {tw.get("id", "") for tw in self._tw_tweets}
-            had_seen = bool(self._tw_seen)
-            new_ids, self._tw_seen = compute_unread(
-                incoming, self._tw_seen, active=(self._mode == 3))
-            if had_seen:
-                self._tw_hl = new_ids
-                if self._mode != 3:
-                    self._tw_unread |= new_ids
-            else:
-                self._tw_hl = set()
-            self._tw_last = datetime.now().strftime("%H:%M")
-            self.lbl_tw_time.setText(f"son: {self._tw_last}")
-            self._twitter_render()
-            self._update_tab_badge()
+            tweets = data.get("data", [])
+            users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
+            self.tw_load_result.emit((tweets, users, None))
         except urllib.error.HTTPError as e:
-            self._tw_tweets = []
-            self._twitter_render()
-            self.lbl_twitter_status.setText(f"hata {e.code}")
+            self.tw_load_result.emit(([], {}, f"hata {e.code}"))
         except Exception:
+            self.tw_load_result.emit(([], {}, "hata"))
+
+    def _twitter_load_apply(self, result):
+        """Ana thread — yükleme sonucunu state'e uygula ve render et (thread-safe)."""
+        from datetime import datetime
+        tweets, users, err = result
+        if err is not None:
             self._tw_tweets = []
             self._twitter_render()
-            self.lbl_twitter_status.setText("hata")
+            self.lbl_twitter_status.setText(err)
+            return
+        self._tw_tweets = tweets
+        self._tw_users = users
+        incoming = {tw.get("id", "") for tw in self._tw_tweets}
+        had_seen = bool(self._tw_seen)
+        new_ids, self._tw_seen = compute_unread(
+            incoming, self._tw_seen, active=(self._mode == 3))
+        if had_seen:
+            self._tw_hl = new_ids
+            if self._mode != 3:
+                self._tw_unread |= new_ids
+        else:
+            self._tw_hl = set()
+        self._tw_last = datetime.now().strftime("%H:%M")
+        self.lbl_tw_time.setText(f"son: {self._tw_last}")
+        self._twitter_render()
+        self._update_tab_badge()
 
     def _twitter_poll(self):
         threading.Thread(target=self._twitter_poll_worker, daemon=True).start()
@@ -1773,11 +1803,16 @@ class OverlayWindow(QWidget):
         self._stocks_refresh()
 
     # ── Sürükle-bırak ───────────────────────────────────────────────────
-    def _on_dropped(self, moved, target):
-        new_order = reorder(self.stocks, moved, target)
+    def _on_dropped(self, moved, target, is_header):
+        # Başlığa bırakma → hisse o bölümün İLK öğesi (başlığın ardına).
+        # Satır arasına bırakma → eski "hedefin önüne" davranışı korunur.
+        new_order = reorder(self.stocks, moved, target, after=is_header)
         if new_order == self.stocks:
             return
         self.stocks = new_order
+        # Katlanmış bir bölüm başlığına bırakıldıysa bölümü aç ki hisse görünsün.
+        if is_header and self._collapsed_sections.get(target):
+            self._collapsed_sections[target] = False
         save_stocks(self.stocks)
         self._rebuild_rows()
         self._apply_cached_prices()

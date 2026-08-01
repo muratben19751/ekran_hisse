@@ -107,8 +107,13 @@ def next_separator_counter(stocks, sep=_SEP_SYMBOL):
     return (max(counters) + 1) if counters else 0
 
 
-def reorder(stocks, moved, target):
-    """`moved` sembolünü `target`'ın önüne taşı (target None → sona). Yeni liste döndürür."""
+def reorder(stocks, moved, target, after=False):
+    """`moved` sembolünü taşı: after=False → `target`'ın ÖNÜNE, after=True → ARDINA.
+
+    target None → listenin SONUNA. after=True özellikle bir bölüm başlığına
+    bırakınca kullanılır: hisse başlığın hemen ardına, yani o bölümün İLK
+    öğesi olarak yerleşir. Yeni liste döndürür; girdi listesi değişmez.
+    """
     idx = next((i for i, s in enumerate(stocks) if s["symbol"] == moved), None)
     if idx is None:
         return list(stocks)
@@ -117,6 +122,9 @@ def reorder(stocks, moved, target):
     if target is None or target == moved:
         out.append(item)
     else:
-        tgt = next((i for i, s in enumerate(out) if s["symbol"] == target), len(out))
-        out.insert(tgt, item)
+        tgt = next((i for i, s in enumerate(out) if s["symbol"] == target), None)
+        if tgt is None:                       # hedef bulunamadı → sona (eski davranış)
+            out.append(item)
+        else:
+            out.insert(tgt + 1 if after else tgt, item)
     return out

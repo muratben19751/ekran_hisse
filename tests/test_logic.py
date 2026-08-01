@@ -168,3 +168,69 @@ def test_reorder_does_not_mutate_input():
     stocks = [{"symbol": "A"}, {"symbol": "B"}]
     logic.reorder(stocks, "A", None)
     assert [s["symbol"] for s in stocks] == ["A", "B"]   # orijinal korunur
+
+
+# ── reorder: after=True (bölüme sürükleme) ───────────────────────────────────
+def test_reorder_after_target():
+    stocks = [{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}]
+    out = logic.reorder(stocks, "C", "A", after=True)
+    assert [s["symbol"] for s in out] == ["A", "C", "B"]
+
+
+def test_reorder_into_section_first_item():
+    # Hata senaryosu: THYAO'yu Bankalar başlığına bırak → bölümün İLK öğesi olur
+    stocks = [
+        {"symbol": "THYAO"},
+        {"symbol": "---:Bankalar:0"},
+        {"symbol": "AKBNK"},
+    ]
+    out = logic.reorder(stocks, "THYAO", "---:Bankalar:0", after=True)
+    assert [s["symbol"] for s in out] == ["---:Bankalar:0", "THYAO", "AKBNK"]
+
+
+def test_reorder_into_empty_section():
+    stocks = [
+        {"symbol": "AKBNK"},
+        {"symbol": "---:Bos:1"},
+    ]
+    out = logic.reorder(stocks, "AKBNK", "---:Bos:1", after=True)
+    assert [s["symbol"] for s in out] == ["---:Bos:1", "AKBNK"]
+
+
+def test_reorder_after_own_header_is_noop_when_first():
+    stocks = [
+        {"symbol": "---:Bankalar:0"},
+        {"symbol": "AKBNK"},
+        {"symbol": "THYAO"},
+    ]
+    out = logic.reorder(stocks, "AKBNK", "---:Bankalar:0", after=True)
+    assert [s["symbol"] for s in out] == ["---:Bankalar:0", "AKBNK", "THYAO"]
+
+
+def test_reorder_after_moves_within_same_section():
+    stocks = [
+        {"symbol": "---:Bankalar:0"},
+        {"symbol": "AKBNK"},
+        {"symbol": "GARAN"},
+        {"symbol": "THYAO"},
+    ]
+    out = logic.reorder(stocks, "THYAO", "---:Bankalar:0", after=True)
+    assert [s["symbol"] for s in out] == ["---:Bankalar:0", "THYAO", "AKBNK", "GARAN"]
+
+
+def test_reorder_after_target_none_appends():
+    stocks = [{"symbol": "A"}, {"symbol": "B"}]
+    out = logic.reorder(stocks, "A", None, after=True)
+    assert [s["symbol"] for s in out] == ["B", "A"]
+
+
+def test_reorder_after_unknown_target_appends():
+    stocks = [{"symbol": "A"}, {"symbol": "B"}]
+    out = logic.reorder(stocks, "A", "ZZZ", after=True)
+    assert [s["symbol"] for s in out] == ["B", "A"]
+
+
+def test_reorder_after_does_not_mutate_input():
+    stocks = [{"symbol": "A"}, {"symbol": "B"}]
+    logic.reorder(stocks, "B", "A", after=True)
+    assert [s["symbol"] for s in stocks] == ["A", "B"]

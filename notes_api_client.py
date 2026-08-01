@@ -1,22 +1,12 @@
 import threading
 import urllib.request
 import json
-import os
 
-# Token ve Gist ID ayrı config dosyasından okunur (git'e gitmez)
-_cfg_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
-_cfg = {}
-if os.path.exists(_cfg_file):
-    with open(_cfg_file) as f:
-        for line in f:
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                _cfg[k.strip()] = v.strip()
+import config
 
-GIST_ID     = _cfg.get("GIST_ID", "")
-GITHUB_TOKEN = _cfg.get("GITHUB_TOKEN", "")
-GIST_API    = f"https://api.github.com/gists/{GIST_ID}"
+GIST_ID      = config.GIST_ID
+GITHUB_TOKEN = config.GITHUB_TOKEN
+GIST_API     = f"https://api.github.com/gists/{GIST_ID}"
 
 
 def _headers():

@@ -1,4 +1,4 @@
-"""EkranHisse — macOS Native görünüm (tasarım 1b).
+"""EkranHisse — Yoğun HUD (tasarım 3c).
 
 main.py, data_fetcher.py, notes_api_client.py ve stocks.json biçimi DEĞİŞMEDİ.
 Sadece bu dosya eski overlay.py'nin yerine kopyalanır.
@@ -6,6 +6,17 @@ Sadece bu dosya eski overlay.py'nin yerine kopyalanır.
 
 import json
 import os
+import subprocess
+import threading
+import urllib.request
+import urllib.parse
+import urllib.error
+
+try:
+    from AppKit import NSEvent as _NSEvent, NSScreen as _NSScreen
+    _APPKIT_OK = True
+except Exception:
+    _APPKIT_OK = False
 
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint, QEvent
@@ -19,16 +30,23 @@ from PySide6.QtWidgets import (
 
 from data_fetcher import fetch_all
 from notes_api_client import fetch_notes, save_notes
+import config
+from logic import (
+    tr_number, parse_price, parse_sep_symbol, twitter_query,
+    symbol_of_tweet, compute_unread, group_stocks,
+    next_separator_counter, reorder,
+)
 
 STOCKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
+TW_SYMBOLS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tw_symbols.json")
 REFRESH_INTERVAL_MS = 60_000
 
 # ── Geometri ────────────────────────────────────────────────────────────────
-PANEL_W = 320
+PANEL_W = 300
 TAB_W   = 32
-TAB_H   = 56
+TAB_H   = 52
 TAB_GAP = 6
-ANIM_MS = 220
+ANIM_MS = 120
 
 R_PANEL  = 12
 R_CARD   = 10
@@ -60,41 +78,50 @@ C_BLUE_HOVER = "#3d9bff"
 C_YELLOW    = "#ffd60a"
 C_TRACK     = "rgba(255, 255, 255, 32)"
 C_SHEET_BG  = "rgba(44, 44, 46, 246)"
+C_TINT_TGT  = "rgba(255, 214, 10, 20)"
+C_TINT_NEW  = "rgba(10, 132, 255, 20)"
 
 MIME_ROW = "application/x-ekranhisse-symbol"
 _SEP_SYMBOL = "---"
 
 
 # ── Yardımcılar ─────────────────────────────────────────────────────────────
+_font_cache: dict = {}
+
 def _f(size, weight=QFont.Normal):
-    f = QFont()          # macOS sistem yazı tipi (SF)
-    f.setPointSize(size)
-    f.setWeight(weight)
+    key = (size, weight)
+    f = _font_cache.get(key)
+    if f is None:
+        f = QFont()
+        f.setPointSize(size)
+        f.setWeight(weight)
+        _font_cache[key] = f
     return f
 
 
-def _tr(v, d=2):
-    """1234.5 → '1.234,50' (TR biçimi)."""
-    s = f"{v:,.{d}f}"
-    return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+# Geriye dönük uyumlu takma adlar — asıl mantık logic.py'da.
+_tr = tr_number
+_parse_price = parse_price
+_parse_sep_symbol = parse_sep_symbol
 
 
-def _parse_price(val: str):
-    v = val.strip()
-    if ',' in v and '.' in v:
-        v = v.replace('.', '').replace(',', '.')
-    else:
-        v = v.replace(',', '.')
-    return float(v)
-
-
-def _parse_sep_symbol(symbol: str):
-    parts = symbol.split(":", 2)
-    if len(parts) == 3:
-        return parts[1], parts[2]
-    if len(parts) == 2:
-        return "", parts[1]
-    return "", "0"
+def _tw_ago(iso):
+    """'2026-07-31T11:02:00.000Z' → '12dk' / '3sa' / '2g'."""
+    if not iso:
+        return ""
+    from datetime import datetime, timezone
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso[11:16]
+    secs = (datetime.now(timezone.utc) - t).total_seconds()
+    if secs < 60:
+        return "şimdi"
+    if secs < 3600:
+        return f"{int(secs // 60)}dk"
+    if secs < 86400:
+        return f"{int(secs // 3600)}sa"
+    return f"{int(secs // 86400)}g"
 
 
 def _main_screen():
@@ -114,18 +141,50 @@ def _boost_level(win, level=1002):
 
 
 def load_stocks():
-    if os.path.exists(STOCKS_FILE):
+    if not os.path.exists(STOCKS_FILE):
+        return []
+    try:
         with open(STOCKS_FILE) as f:
             data = json.load(f)
-        if data and isinstance(data[0], str):
-            return [{"symbol": s, "entry": None, "exit": None} for s in data]
-        return data
-    return []
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+    if data and isinstance(data[0], str):
+        return [{"symbol": s, "entry": None, "exit": None} for s in data]
+    # eksik "symbol" alanı olan bozuk kayıtları ele
+    return [s for s in data if isinstance(s, dict) and "symbol" in s]
 
 
 def save_stocks(stocks):
-    with open(STOCKS_FILE, "w") as f:
-        json.dump(stocks, f)
+    try:
+        with open(STOCKS_FILE, "w") as f:
+            json.dump(stocks, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def load_tw_symbols():
+    """𝕏 takip sembolleri; dosya yoksa/bozuksa varsayılan ['TTKOM']."""
+    if not os.path.exists(TW_SYMBOLS_FILE):
+        return ["TTKOM"]
+    try:
+        with open(TW_SYMBOLS_FILE) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return ["TTKOM"]
+    if not isinstance(data, list):
+        return ["TTKOM"]
+    syms = [str(s).upper() for s in data if isinstance(s, str) and s.strip()]
+    return syms or ["TTKOM"]
+
+
+def save_tw_symbols(symbols):
+    try:
+        with open(TW_SYMBOLS_FILE, "w") as f:
+            json.dump(symbols, f, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def _pill(text, primary=False, width=None):
@@ -142,6 +201,20 @@ def _pill(text, primary=False, width=None):
         f"QPushButton {{ background: {bg}; color: {fg}; border: none;"
         f" border-radius: {R_BTN}px; padding: 0 12px; }}"
         f"QPushButton:hover {{ background: {hov}; color: #ffffff; }}"
+    )
+    return b
+
+
+def _flat(text, color=None):
+    """Yoğun görünüm için çerçevesiz metin butonu."""
+    b = QPushButton(text)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setFont(_f(11))
+    b.setFixedHeight(18)
+    b.setStyleSheet(
+        f"QPushButton {{ background: transparent; border: none; padding: 0 2px;"
+        f" color: {color or C_TEXT3}; text-align: left; }}"
+        f"QPushButton:hover {{ color: {color or C_TEXT}; }}"
     )
     return b
 
@@ -248,6 +321,146 @@ class TextSheet(_SheetDialog):
         self.accept()
 
 
+_BIST_SYMBOLS = [
+    "ACSEL","ADEL","ADESE","AEFES","AFYON","AGESA","AGHOL","AGYO","AHGAZ","AHSGY",
+    "AKBNK","AKCNS","AKFGY","AKGRT","AKINM","AKSA","AKSEL","AKSEN","AKSGY","AKSUE",
+    "AKTIF","ALARK","ALBRK","ALFAS","ALGYO","ALKA","ALKIM","ALKLC","ALMAD","ALTNY",
+    "ANELE","ANGEN","ANHYT","ANSGR","ARASE","ARCLK","ARDYZ","ARENA","ARSAN","ARTMS",
+    "ARZUM","ASELS","ASGYO","ASTOR","ASUZU","ATAGY","ATAKP","ATATP","ATEKS","ATLAS",
+    "ATSYH","AVHOL","AVOD","AYCES","AYEN","AYES","AZTEK","BAGFS","BAKAB","BALAT",
+    "BANVT","BARMA","BASCM","BASGZ","BAYRK","BERA","BEYAZ","BFREN","BIMAS","BIOEN",
+    "BIZIM","BJKAS","BLCYT","BNTAS","BOSSA","BRISA","BRKO","BRKVY","BRMEN","BRSAN",
+    "BRYAT","BSOKE","BTCIM","BUCIM","BURCE","BURVA","BVSAN","CANTE","CASA","CCOLA",
+    "CELHA","CEMAS","CEMTS","CENTA","CIMSA","CLEBI","CMENT","CONSE","COSMO","CRFSA",
+    "CUSAN","CVKMD","CWENE","DAGHL","DAPGM","DARDL","DENGE","DERHL","DERIM","DESA",
+    "DESPC","DEVA","DGATE","DGGYO","DGNMO","DITAS","DJIST","DMSAS","DNISI","DOAS",
+    "DOBUR","DOCO","DOGUB","DOHOL","DOMCO","DOPA","DPAZR","DRDOC","DTRND","DURDO",
+    "DYOBY","DZGYO","EBEBK","EDATA","EDIP","EGEEN","EGEPO","EGGUB","EGPRO","EGSER",
+    "EKGYO","ELITE","EMKEL","EMNIS","ENDKS","ENERY","ENGYO","ENJSA","ENKAI","ENSRI",
+    "EPLAS","ERBOS","ERCB","ERDEM","ERDGD","EREGL","ERSU","ESCAR","ESCOM","ESEN",
+    "ETILR","ETYAT","EUHOL","EUPWR","EUREN","EUYO","EYGYO","FADE","FENER","FMIZP",
+    "FONET","FORMT","FORTE","FROTO","FZLGY","GARAN","GARFA","GEDIK","GEDZA","GENIL",
+    "GENTS","GEREL","GESAN","GLBMD","GLCVY","GLRYH","GLYHO","GMTAS","GOKNR","GOLTS",
+    "GOODY","GOZDE","GRSEL","GRTHO","GSDDE","GSDHO","GSRAY","GUBRF","GWIND","GZNMI",
+    "HALKB","HATEK","HDFGS","HEDEF","HEKTS","HLGYO","HTTBT","HUNER","HURGZ","ICBCT",
+    "ICUGS","IDEAS","IDGYO","IEYHO","IHEVA","IHGZT","IHLAS","IHLGM","IHYAY","IMASM",
+    "INDES","INFO","INTEM","INVEO","INVES","IPEKE","ISBIR","ISCTR","ISDMR","ISFIN",
+    "ISGSY","ISGYO","ISYAT","ITTFH","IZENR","IZFAS","IZINV","IZMDC","JANTS","KARMA",
+    "KARTN","KATMR","KAYSE","KBORU","KCAER","KCHOL","KENT","KERVN","KFEIN","KGYO",
+    "KLGYO","KLKIM","KLMSN","KLNMA","KLRHO","KLSER","KMPUR","KNFRT","KORDS","KOTON",
+    "KOZAA","KOZAL","KRDMA","KRDMB","KRDMD","KRGYO","KRONT","KRPLS","KRSTL","KRTEK",
+    "KRVGD","KSTUR","KTLEV","KTSKR","KUTPO","KUYAS","KVGYO","KZBGY","LIDER","LIDFA",
+    "LINK","LMKDC","LOGO","LRSHO","LUKSK","MAALT","MAGEN","MAKIM","MAKTK","MANAS",
+    "MARBL","MARKA","MARTI","MAVI","MEDTR","MEGAP","MEGMT","MEKAG","MEPET","MERCN",
+    "MERIT","MERKO","METRO","METUR","MGROS","MHRGY","MIPAZ","MMCAS","MNDRS","MNDTR",
+    "MOBTL","MOGAN","MSGYO","MTRKS","MTRYO","MZHLD","NATEN","NETAS","NIBAS","NTGAZ",
+    "NTHOL","NUGYO","NUHCM","OBAMS","OBASE","ODAS","ODINE","OFSYM","OKCYM","ONCSM",
+    "ONUR","ORGE","ORMA","OSMEN","OSTIM","OTKAR","OYAKC","OYAYO","OYLUM","OZGYO",
+    "OZKGY","OZRDN","OZSUB","PAGYO","PAMEL","PAPIL","PCILT","PDPAS","PEGYO","PEKGY",
+    "PENGD","PENTA","PETKM","PETUN","PGSUS","PINSU","PKART","PNLSN","POLHO","POLTK",
+    "PRKAB","PRKME","PRZMA","PSDTC","PSGYO","PTOFS","PTHOL","RAKSN","RALYH","RAYSG",
+    "RHEAG","RNPOL","RODRG","RTALB","RUBNS","RYGYO","RYSAS","SAFKR","SAGYO","SAHOL",
+    "SANEL","SANFM","SANKO","SARKY","SASA","SAYAS","SDTTR","SEGMN","SEGYO","SEKFK",
+    "SEKUR","SELEC","SELGD","SELVA","SEYKM","SILVR","SISE","SKBNK","SKTAS","SKYMD",
+    "SMRTG","SNGYO","SNKRN","SODSN","SOKM","SONME","SRVGY","SUMAS","SUNEKS","SUWEN",
+    "TABGD","TATEN","TATGD","TAVHL","TBORG","TCELL","TDGYO","TEKTU","TERA","TEZOL",
+    "TGSAS","THYAO","TIRE","TKNSA","TKURU","TMSN","TOASO","TRCAS","TRGYO","TRILC",
+    "TSPOR","TTKOM","TTRAK","TUCLK","TURGZ","TURSG","TZNGY","ULUFA","ULUSE","ULUUN",
+    "UMPAS","UNLU","UNYEC","USAK","UZERB","VAKBN","VAKFN","VAKKO","VBTYZ","VERTU",
+    "VERUS","VESBE","VESTL","VKGYO","VKFYO","VRGYO","WNDYR","XTCRT","XU030","XU050",
+    "XU100","XBANK","XBLSM","XGIDA","XHOLD","XKMYA","XKURY","XMANA","XMESY","XSGRT",
+    "XSPOR","XTEKS","XTRZM","XTUFE","XUMAL","XUSIN","XUTEK","XUHIZ","XAUUSD",
+    "YATAS","YBTAS","YKBK","YKSLN","YUNSA","YYLGD","ZEDUR","ZOREN","ZORLU",
+]
+
+
+class StockPickerSheet(_SheetDialog):
+    """Hisse ekleme — yazarken filtreli liste."""
+
+    def __init__(self, existing=None, parent=None):
+        super().__init__(parent)
+        self._existing = {s.upper() for s in (existing or [])}
+        self.value = None
+
+        head = QLabel("Hisse ekle")
+        head.setFont(_f(13, QFont.DemiBold))
+        head.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+        self.lay.addWidget(head)
+
+        self.inp = QLineEdit()
+        self.inp.setFont(_f(13))
+        self.inp.setFixedHeight(28)
+        self.inp.setPlaceholderText("Sembol yaz… (örn. THYAO)")
+        self.inp.setStyleSheet(
+            f"QLineEdit {{ background: {C_FIELD}; border: 1px solid {C_BORDER};"
+            f" border-radius: {R_BTN}px; color: {C_TEXT}; padding: 0 9px; }}"
+            f"QLineEdit:focus {{ border-color: {C_BLUE}; }}"
+        )
+        self.lay.addWidget(self.inp)
+
+        self.lst = QListWidget()
+        self.lst.setFixedHeight(160)
+        self.lst.setFont(_f(12))
+        self.lst.setStyleSheet(
+            f"QListWidget {{ background: {C_FIELD}; border: 1px solid {C_BORDER};"
+            f" border-radius: {R_BTN}px; color: {C_TEXT}; outline: none; }}"
+            f"QListWidget::item {{ padding: 4px 9px; }}"
+            f"QListWidget::item:selected {{ background: {C_BLUE}; color: #fff; border-radius: 4px; }}"
+            f"QListWidget::item:hover:!selected {{ background: rgba(255,255,255,18); }}"
+        )
+        self.lay.addWidget(self.lst)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        bar.addStretch()
+        cancel = _pill("İptal")
+        ok = _pill("Ekle", primary=True)
+        bar.addWidget(cancel)
+        bar.addWidget(ok)
+        self.lay.addLayout(bar)
+
+        self.inp.textChanged.connect(self._filter)
+        self.inp.returnPressed.connect(self._ok)
+        self.lst.itemDoubleClicked.connect(self._ok)
+        self.lst.itemClicked.connect(lambda item: self.inp.setText(item.text()))
+        ok.clicked.connect(self._ok)
+        cancel.clicked.connect(self.reject)
+
+        self._filter("")
+        self._place(260, 290)
+        self.inp.setFocus()
+
+    def _filter(self, text):
+        q = text.strip().upper()
+        self.lst.clear()
+        for sym in _BIST_SYMBOLS:
+            if sym in self._existing:
+                continue
+            if not q or sym.startswith(q):
+                self.lst.addItem(sym)
+        if self.lst.count() > 0:
+            self.lst.setCurrentRow(0)
+
+    def _ok(self):
+        selected = self.lst.currentItem()
+        typed = self.inp.text().strip().upper()
+        self.value = selected.text() if selected else typed
+        if self.value:
+            self.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Down:
+            row = self.lst.currentRow()
+            if row < self.lst.count() - 1:
+                self.lst.setCurrentRow(row + 1)
+        elif event.key() == Qt.Key_Up:
+            row = self.lst.currentRow()
+            if row > 0:
+                self.lst.setCurrentRow(row - 1)
+        else:
+            super().keyPressEvent(event)
+
+
 class TargetSheet(_SheetDialog):
     """Giriş + çıkış hedefi tek sheet'te (result: ('save', e, x) | ('clear',) | None)."""
 
@@ -351,6 +564,57 @@ class TargetBar(QWidget):
 
 
 # ── Satırlar ────────────────────────────────────────────────────────────────
+class Sparkline(QWidget):
+    """Oturum boyunca biriken fiyatlardan mini çubuk grafik."""
+
+    MAX = 24
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(14)
+        self.setMinimumWidth(36)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._points = []
+        self._up = True
+
+    def restore(self, points, up):
+        """Rebuild sonrası birikmiş geçmişi geri yükle."""
+        self._points = list(points)[-self.MAX:]
+        self._up = bool(up)
+        self.update()
+
+    def push(self, price, up):
+        if price is None:
+            return
+        self._up = bool(up)
+        if not self._points or abs(self._points[-1] - price) > 1e-9:
+            self._points.append(price)
+            if len(self._points) > self.MAX:
+                self._points = self._points[-self.MAX:]
+        self.update()
+
+    def paintEvent(self, _):
+        pts = self._points
+        if len(pts) < 2:
+            return
+        p = QPainter(self)
+        p.setPen(Qt.NoPen)
+        w, h = self.width(), self.height()
+        n = len(pts)
+        bw = max(1.0, (w - (n - 1)) / n)
+        lo, hi = min(pts), max(pts)
+        span = (hi - lo) or 1.0
+        for i, v in enumerate(pts):
+            frac = 0.25 + 0.75 * ((v - lo) / span)
+            bh = max(2, int(h * frac))
+            c = QColor(C_GREEN if self._up else C_RED)
+            c.setAlpha(min(255, 95 + int(140 * (i + 1) / n)))
+            p.setBrush(c)
+            p.drawRect(int(i * (bw + 1)), h - bh, max(1, int(bw)), bh)
+        p.end()
+
+
 class StockRow(QWidget):
     remove_requested = Signal(str)
     levels_changed   = Signal(str, object, object)
@@ -361,122 +625,97 @@ class StockRow(QWidget):
         self.symbol = symbol
         self._entry, self._exit, self._price = entry, exit_price, None
         self._press_pos = None
+        self._reached = False
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setObjectName("row")
-        self.setStyleSheet(
-            "#row { background: transparent; }"
-            f"#row:hover {{ background: {C_ROW_HOVER}; }}"
-        )
+        self.setFixedHeight(26)
         self.setCursor(Qt.PointingHandCursor)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 8, 12, 9)
-        outer.setSpacing(6)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 0, 12, 0)
+        lay.setSpacing(8)
 
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(8)
-
+        head = QWidget()
+        head.setFixedWidth(60)
+        head.setStyleSheet("background: transparent;")
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(4)
         self.lbl_symbol = QLabel(symbol)
-        self.lbl_symbol.setFont(_f(13, QFont.DemiBold))
+        self.lbl_symbol.setFont(_f(11, QFont.DemiBold))
         self.lbl_symbol.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+        self.dot = QLabel()
+        self.dot.setFixedSize(5, 5)
+        self.dot.setVisible(False)
+        hl.addWidget(self.lbl_symbol)
+        hl.addWidget(self.dot)
+        hl.addStretch()
 
-        self.lbl_badge = QLabel("Hedef")
-        self.lbl_badge.setFont(_f(10, QFont.DemiBold))
-        self.lbl_badge.setStyleSheet(
-            f"color: {C_YELLOW}; background: rgba(255,214,10,46);"
-            " border-radius: 5px; padding: 2px 6px;"
-        )
-        self.lbl_badge.setVisible(False)
+        self.spark = Sparkline()
 
         self.lbl_price = QLabel("—")
-        self.lbl_price.setFont(_f(13))
-        self.lbl_price.setStyleSheet(f"color: {C_TEXT2}; background: transparent;")
+        self.lbl_price.setFont(_f(11))
+        self.lbl_price.setFixedWidth(70)
         self.lbl_price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.lbl_price.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.lbl_price.setStyleSheet(f"color: {C_TEXT2}; background: transparent;")
 
         self.lbl_pct = QLabel("—")
         self.lbl_pct.setFont(_f(11, QFont.DemiBold))
-        self.lbl_pct.setAlignment(Qt.AlignCenter)
-        self.lbl_pct.setMinimumWidth(58)
-        self._set_pill(None)
+        self.lbl_pct.setFixedWidth(46)
+        self.lbl_pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_pct.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
 
-        top.addWidget(self.lbl_symbol)
-        top.addWidget(self.lbl_badge)
-        top.addWidget(self.lbl_price)
-        top.addWidget(self.lbl_pct)
-        outer.addLayout(top)
-
-        self.target_wrap = QWidget()
-        tv = QVBoxLayout(self.target_wrap)
-        tv.setContentsMargins(0, 0, 0, 2)
-        tv.setSpacing(5)
-        self.bar = TargetBar()
-        tv.addWidget(self.bar)
-
-        meta = QHBoxLayout()
-        meta.setContentsMargins(0, 0, 0, 0)
-        meta.setSpacing(0)
-        self.lbl_entry = QLabel("")
-        self.lbl_pnl   = QLabel("")
-        self.lbl_exit  = QLabel("")
-        for lb in (self.lbl_entry, self.lbl_pnl, self.lbl_exit):
-            lb.setFont(_f(11))
-            lb.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
-        meta.addWidget(self.lbl_entry)
-        meta.addStretch()
-        meta.addWidget(self.lbl_pnl)
-        meta.addStretch()
-        meta.addWidget(self.lbl_exit)
-        tv.addLayout(meta)
-        outer.addWidget(self.target_wrap)
+        lay.addWidget(head)
+        lay.addWidget(self.spark, 1)
+        lay.addWidget(self.lbl_price)
+        lay.addWidget(self.lbl_pct)
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._ctx_menu)
         self._sync_target()
 
     # görünüm ------------------------------------------------------------
-    def _set_pill(self, pct):
-        if pct is None:
-            self.lbl_pct.setText("—")
-            self.lbl_pct.setStyleSheet(
-                f"color: {C_TEXT3}; background: {C_CTRL}; border-radius: 6px; padding: 3px 7px;"
-            )
-            return
-        up = pct >= 0
-        self.lbl_pct.setText(("+" if up else "−") + _tr(abs(pct)) + "%")
-        self.lbl_pct.setStyleSheet(
-            f"color: {C_GREEN_INK if up else C_RED_INK};"
-            f" background: {C_GREEN if up else C_RED};"
-            " border-radius: 6px; padding: 3px 7px;"
+    def _paint_bg(self):
+        tint = C_TINT_TGT if self._reached else "transparent"
+        self.setStyleSheet(
+            f"#row {{ background: {tint}; }}"
+            f"#row:hover {{ background: {C_ROW_HOVER}; }}"
         )
 
     def _sync_target(self):
         has = self._entry is not None and self._exit is not None
-        self.target_wrap.setVisible(has)
-        if not has:
-            self.lbl_badge.setVisible(False)
-            return
-        self.bar.set_levels(self._entry, self._exit, self._price)
-        self.lbl_entry.setText(_tr(self._entry))
-        self.lbl_exit.setText(_tr(self._exit))
-        if self._price is None:
-            self.lbl_pnl.setText("")
-            self.lbl_badge.setVisible(False)
-            return
-        reached = self._price >= max(self._entry, self._exit)
-        self.lbl_badge.setVisible(reached)
-        if self._entry:
-            pnl = (self._price - self._entry) / self._entry * 100
-            self.lbl_pnl.setText(("+" if pnl >= 0 else "−") + _tr(abs(pnl), 1) + "% hedefe")
-            self.lbl_pnl.setStyleSheet(
-                f"color: {C_YELLOW if reached else C_GREEN}; background: transparent;"
+        self.dot.setVisible(has)
+        self._reached = False
+        if has:
+            self._reached = (
+                self._price is not None and self._price >= max(self._entry, self._exit)
             )
+            self.dot.setStyleSheet(
+                f"background: {C_YELLOW if self._reached else C_GREEN}; border-radius: 2px;"
+            )
+            tip = f"Giriş {_tr(self._entry)}  ·  Çıkış {_tr(self._exit)}"
+            if self._price is not None and self._entry:
+                pnl = (self._price - self._entry) / self._entry * 100
+                sign = "+" if pnl >= 0 else "−"
+                tip += f"  ·  {sign}{_tr(abs(pnl), 1)}%"
+            self.setToolTip(tip)
+        else:
+            self.setToolTip("")
+        self._paint_bg()
 
     def update_data(self, price, change_pct):
         self._price = price
-        self.lbl_price.setText("—" if price is None else "₺" + _tr(price))
-        self._set_pill(change_pct)
+        self.lbl_price.setText("—" if price is None else _tr(price))
+        if change_pct is None:
+            self.lbl_pct.setText("—")
+            self.lbl_pct.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        else:
+            up = change_pct >= 0
+            self.lbl_pct.setText(("+" if up else "−") + _tr(abs(change_pct)))
+            self.lbl_pct.setStyleSheet(
+                f"color: {C_GREEN if up else C_RED}; background: transparent;"
+            )
+            self.spark.push(price, up)
         self._sync_target()
 
     # sürükle-bırak ------------------------------------------------------
@@ -550,23 +789,23 @@ class GroupHeader(QWidget):
         self.symbol = uid
         self._collapsed = collapsed
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(18)
+        self.setFixedHeight(16)
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(6, 0, 6, 0)
-        lay.setSpacing(6)
+        lay.setContentsMargins(12, 0, 12, 0)
+        lay.setSpacing(5)
 
         name, _ = _parse_sep_symbol(uid)
         self.lbl = QLabel((name or "Takip").upper())
-        self.lbl.setFont(_f(11, QFont.DemiBold))
+        self.lbl.setFont(_f(9, QFont.Bold))
         self.lbl.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
 
         self.chev = QLabel("›" if collapsed else "⌄")
-        self.chev.setFont(_f(11))
+        self.chev.setFont(_f(9))
         self.chev.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
 
         self.cnt = QLabel(str(count))
-        self.cnt.setFont(_f(11))
+        self.cnt.setFont(_f(9))
         self.cnt.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
 
         lay.addWidget(self.lbl)
@@ -653,21 +892,41 @@ class RowsHost(QWidget):
 
 # ── Ana pencere ─────────────────────────────────────────────────────────────
 class OverlayWindow(QWidget):
-    def __init__(self):
+    # Poll worker (arka plan thread) yeni tweet id'lerini bu sinyalle
+    # ana thread'e iletir; UI/state değişikliği yalnızca ana thread'de olur.
+    tw_poll_result = Signal(set)
+
+    def __init__(self, signals):
         super().__init__()
+        self._signals = signals
         self._mode = 0
         self._fetching = False
         self.stocks = load_stocks()
         self.rows = {}
         self.headers = {}
+        self._spark_history = {}   # {symbol: (points, up)} — rebuild'ler arası korunur
         self._collapsed_sections = {}
         self._filter = ""
+
+        self._tw_seen = set()        # görülmüş tüm tweet id'leri
+        self._tw_unread = set()      # sekme rozetindeki sayaç
+        self._tw_hl = set()          # satırlarda mavi vurgulananlar
+        self._tw_filter = None       # aktif sembol çipi
+        self._tw_tweets = []
+        self._tw_users = {}
+        self._tw_last = "—"
+        self._tw_symbols = load_tw_symbols()   # izlenen semboller (kalıcı)
 
         self._notes = []
         self._current_note = None
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._notes_save_now)
+
+        # Arama debounce — her tuşta değil, yazma durunca rebuild
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self._apply_search_filter)
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
@@ -683,7 +942,7 @@ class OverlayWindow(QWidget):
         win_y = sc_avail.y() + sc_avail.height() - win_h
         self._anim = QPropertyAnimation(self.panel, b"maximumWidth")
         self._anim.setDuration(ANIM_MS)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.setEasingCurve(QEasingCurve.OutQuart)
         self._anim.valueChanged.connect(lambda w: (
             self.setFixedWidth(TAB_W + w),
             self.move(sc.x() + sc.width() - TAB_W - w, self.y())
@@ -697,11 +956,16 @@ class OverlayWindow(QWidget):
         self.stock_timer.start(REFRESH_INTERVAL_MS)
         if self.stocks:
             self._stocks_refresh()
-        QTimer.singleShot(1000, self._notes_load)
+        # Notlar sekmeye ilk geçişte yüklenir (_toggle içinde); başlangıçta gereksiz istek yok.
         QTimer.singleShot(500, self._install_global_mouse_monitor)
         self._outside_click_timer = QTimer(self)
         self._outside_click_timer.timeout.connect(self._check_outside_click)
-        self._outside_click_timer.start(100)
+        self._outside_click_timer.start(150)
+
+        self._twitter_poll_timer = QTimer(self)
+        self._twitter_poll_timer.timeout.connect(self._twitter_poll)
+        self._twitter_poll_timer.start(60_000)
+        self.tw_poll_result.connect(self._twitter_poll_apply)
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -716,9 +980,11 @@ class OverlayWindow(QWidget):
         tc.setSpacing(TAB_GAP)
         self.tab_stock = self._make_tab("◧", 1)
         self.tab_notes = self._make_tab("✎", 2)
+        self.tab_twitter = self._make_tab("𝕏", 3)
         tc.addStretch()
         tc.addWidget(self.tab_stock)
         tc.addWidget(self.tab_notes)
+        tc.addWidget(self.tab_twitter)
 
         self.panel = QWidget()
         self.panel.setObjectName("panel")
@@ -740,6 +1006,9 @@ class OverlayWindow(QWidget):
         self.notes_page = self._build_notes_page()
         self.notes_page.setVisible(False)
         pnl.addWidget(self.notes_page)
+        self.twitter_page = self._build_twitter_page()
+        self.twitter_page.setVisible(False)
+        pnl.addWidget(self.twitter_page)
 
         root.addWidget(self.panel)
         root.addWidget(tab_col)
@@ -752,19 +1021,29 @@ class OverlayWindow(QWidget):
         lyt = QVBoxLayout(tab)
         lyt.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(glyph)
-        lbl.setFont(_f(15))
+        lbl.setFont(_f(14))
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setStyleSheet("background: transparent;")
         lyt.addWidget(lbl)
         tab._label = lbl
         tab._mode = mode
+        if mode == 3:
+            self.tab_badge = QLabel("", tab)
+            self.tab_badge.setFont(_f(9, QFont.Bold))
+            self.tab_badge.setAlignment(Qt.AlignCenter)
+            self.tab_badge.setFixedSize(16, 14)
+            self.tab_badge.move(TAB_W - 20, 6)
+            self.tab_badge.setStyleSheet(
+                f"background: {C_RED}; color: #ffffff; border-radius: 7px;"
+            )
+            self.tab_badge.hide()
         tab.mousePressEvent = lambda e, m=mode: (
             self._quit_menu(e) if e.button() == Qt.RightButton else self._toggle(m)
         )
         self._paint_tab(tab, False)
         return tab
 
-    def _paint_tab(self, tab, active):
+    def _paint_tab(self, tab, active, alert=False):
         bg = C_BLUE if active else "rgba(48, 48, 50, 214)"
         border = "none" if active else f"1px solid {C_BORDER}"
         tab.setStyleSheet(
@@ -775,22 +1054,60 @@ class OverlayWindow(QWidget):
             f"color: {'#ffffff' if active else C_TEXT2}; background: transparent;"
         )
 
-    def _title_row(self, title):
+    def _update_tab_badge(self):
+        n = len(self._tw_unread)
+        if not hasattr(self, "tab_badge"):
+            return
+        if n and self._mode != 3:
+            self.tab_badge.setText(str(n) if n < 100 else "99")
+            self.tab_badge.show()
+            self.tab_badge.raise_()
+        else:
+            self.tab_badge.hide()
+
+    def _head_row(self, title, status_text=""):
+        """Kompakt sayfa başlığı: 12 px başlık + sağda durum, altında saç çizgisi."""
         w = QWidget()
+        w.setObjectName("headrow")
+        w.setStyleSheet(f"#headrow {{ border-bottom: 1px solid {C_HAIRLINE}; }}")
         h = QHBoxLayout(w)
-        h.setContentsMargins(14, 12, 14, 10)
-        h.setSpacing(8)
+        h.setContentsMargins(12, 8, 12, 7)
+        h.setSpacing(7)
         lbl = QLabel(title)
-        lbl.setFont(_f(15, QFont.DemiBold))
+        lbl.setFont(_f(12, QFont.DemiBold))
         lbl.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
-        status = QLabel("")
-        status.setFont(_f(11))
+        status = QLabel(status_text)
+        status.setFont(_f(10))
         status.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(lbl)
         h.addStretch()
         h.addWidget(status)
         return w, status
+
+    def _foot_row(self):
+        w = QWidget()
+        w.setObjectName("footrow")
+        w.setStyleSheet(f"#footrow {{ border-top: 1px solid {C_HAIRLINE}; }}")
+        h = QHBoxLayout(w)
+        h.setContentsMargins(12, 6, 12, 7)
+        h.setSpacing(10)
+        return w, h
+
+    def _scroll_area(self, host):
+        sc = QScrollArea()
+        sc.setWidget(host)
+        sc.setWidgetResizable(True)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sc.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        sc.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: transparent; width: 5px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,40);"
+            " border-radius: 2px; min-height: 24px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        )
+        return sc
 
     # ── Hisse sayfası ───────────────────────────────────────────────────
     def _build_stocks_page(self):
@@ -799,86 +1116,61 @@ class OverlayWindow(QWidget):
         pnl.setContentsMargins(0, 0, 0, 0)
         pnl.setSpacing(0)
 
-        head, self.lbl_stock_status = self._title_row("Portföy")
+        head, self.lbl_stock_status = self._head_row("Portföy")
         pnl.addWidget(head)
 
-        # Arama + ekle
+        # ince arama satırı
         search_wrap = QWidget()
+        search_wrap.setObjectName("searchrow")
+        search_wrap.setStyleSheet(f"#searchrow {{ border-bottom: 1px solid {C_HAIRLINE}; }}")
         sw = QHBoxLayout(search_wrap)
-        sw.setContentsMargins(14, 0, 14, 10)
-        sw.setSpacing(0)
-        field = QWidget()
-        field.setObjectName("searchfield")
-        field.setFixedHeight(28)
-        field.setStyleSheet(
-            f"#searchfield {{ background: {C_FIELD}; border-radius: 8px; }}"
-        )
-        fl = QHBoxLayout(field)
-        fl.setContentsMargins(10, 0, 6, 0)
-        fl.setSpacing(7)
+        sw.setContentsMargins(12, 5, 12, 6)
+        sw.setSpacing(6)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Ara veya ekle")
-        self.search.setFont(_f(12))
+        self.search.setPlaceholderText("Ara")
+        self.search.setFont(_f(11))
+        self.search.setFixedHeight(20)
         self.search.setStyleSheet(
-            f"QLineEdit {{ background: transparent; border: none; color: {C_TEXT}; }}"
+            f"QLineEdit {{ background: {C_FIELD}; border: none; border-radius: 5px;"
+            f" color: {C_TEXT}; padding: 0 7px; }}"
         )
         self.search.textChanged.connect(self._on_search)
         self.search.returnPressed.connect(self._add_from_search)
         self.btn_add_inline = QPushButton("Ekle")
-        self.btn_add_inline.setFont(_f(11, QFont.DemiBold))
-        self.btn_add_inline.setFixedHeight(20)
+        self.btn_add_inline.setFont(_f(10, QFont.DemiBold))
+        self.btn_add_inline.setFixedHeight(18)
         self.btn_add_inline.setCursor(Qt.PointingHandCursor)
         self.btn_add_inline.setStyleSheet(
             f"QPushButton {{ background: {C_BLUE}; color: #fff; border: none;"
-            f" border-radius: 6px; padding: 0 9px; }}"
+            f" border-radius: 5px; padding: 0 8px; }}"
             f"QPushButton:hover {{ background: {C_BLUE_HOVER}; }}"
         )
         self.btn_add_inline.clicked.connect(self._add_from_search)
         self.btn_add_inline.setVisible(False)
-        fl.addWidget(self.search)
-        fl.addWidget(self.btn_add_inline)
-        sw.addWidget(field)
+        sw.addWidget(self.search)
+        sw.addWidget(self.btn_add_inline)
         pnl.addWidget(search_wrap)
 
-        # Liste
         self.host = RowsHost()
         self.rows_layout = QVBoxLayout(self.host)
-        self.rows_layout.setContentsMargins(10, 0, 10, 4)
-        self.rows_layout.setSpacing(14)
+        self.rows_layout.setContentsMargins(0, 4, 0, 6)
+        self.rows_layout.setSpacing(6)
         self.rows_layout.setAlignment(Qt.AlignTop)
         self.host.dropped.connect(self._on_dropped)
-
-        scroll = QScrollArea()
-        scroll.setWidget(self.host)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            "QScrollBar:vertical { background: transparent; width: 6px; }"
-            "QScrollBar::handle:vertical { background: rgba(255,255,255,45);"
-            " border-radius: 3px; min-height: 24px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        )
-        pnl.addWidget(scroll, 1)
+        pnl.addWidget(self._scroll_area(self.host), 1)
 
         self.lbl_empty = QLabel("Takip listen boş\nSembolü yaz, listeden ekle.")
-        self.lbl_empty.setFont(_f(12))
+        self.lbl_empty.setFont(_f(11))
         self.lbl_empty.setAlignment(Qt.AlignCenter)
         self.lbl_empty.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         self.rows_layout.addWidget(self.lbl_empty)
 
-        # Alt bar
-        bar = QWidget()
-        bar.setObjectName("toolbar")
-        bar.setStyleSheet(f"#toolbar {{ border-top: 1px solid {C_BORDER}; }}")
-        bl = QHBoxLayout(bar)
-        bl.setContentsMargins(14, 10, 14, 12)
-        bl.setSpacing(8)
-        b_add = _pill("+ Hisse", primary=False)
+        bar, bl = self._foot_row()
+        b_add = _flat("+ Hisse")
         b_add.clicked.connect(self._add_stock)
-        b_sec = _pill("Bölüm")
+        b_sec = _flat("+ Bölüm")
         b_sec.clicked.connect(self._add_separator)
-        b_ref = _pill("↻", width=24)
+        b_ref = _flat("↻")
         b_ref.clicked.connect(self._stocks_refresh)
         bl.addWidget(b_add)
         bl.addWidget(b_sec)
@@ -896,67 +1188,395 @@ class OverlayWindow(QWidget):
         pnl.setContentsMargins(0, 0, 0, 0)
         pnl.setSpacing(0)
 
-        head, self.lbl_notes_status = self._title_row("Notlar")
+        head, self.lbl_notes_status = self._head_row("Notlar")
         pnl.addWidget(head)
 
-        list_wrap = QWidget()
-        lw = QVBoxLayout(list_wrap)
-        lw.setContentsMargins(10, 0, 10, 10)
         self.notes_list = QListWidget()
-        self.notes_list.setFixedHeight(140)
-        self.notes_list.setFont(_f(13))
+        self.notes_list.setFixedHeight(116)
+        self.notes_list.setFont(_f(11))
         self.notes_list.setStyleSheet(
-            f"QListWidget {{ background: {C_CARD}; border: none;"
-            f" border-radius: {R_CARD}px; color: {C_TEXT2}; padding: 0; outline: none; }}"
-            f"QListWidget::item {{ padding: 8px 12px; border-bottom: 1px solid {C_HAIRLINE}; }}"
-            f"QListWidget::item:selected {{ background: {C_BLUE}; color: #ffffff; }}"
+            f"QListWidget {{ background: transparent; border: none;"
+            f" border-bottom: 1px solid {C_HAIRLINE};"
+            f" color: {C_TEXT2}; padding: 0; outline: none; }}"
+            f"QListWidget::item {{ padding: 5px 12px; }}"
+            f"QListWidget::item:hover {{ background: {C_ROW_HOVER}; }}"
+            f"QListWidget::item:selected {{ background: rgba(10,132,255,36); color: #ffffff; }}"
         )
         self.notes_list.currentRowChanged.connect(self._note_selected)
         self.notes_list.itemDoubleClicked.connect(self._rename_note)
-        lw.addWidget(self.notes_list)
-        pnl.addWidget(list_wrap)
+        pnl.addWidget(self.notes_list)
 
-        ed_wrap = QWidget()
-        ew = QVBoxLayout(ed_wrap)
-        ew.setContentsMargins(10, 0, 10, 10)
         self.notes_editor = QTextEdit()
         self.notes_editor.setPlaceholderText("Not içeriği…")
         self.notes_editor.setEnabled(False)
-        self.notes_editor.setFont(_f(13))
+        self.notes_editor.setFont(_f(11))
         self.notes_editor.setStyleSheet(
-            f"QTextEdit {{ background: {C_EDITOR_BG}; border: 1px solid {C_BORDER};"
-            f" border-radius: {R_CARD}px; color: {C_TEXT2}; padding: 10px; }}"
-            f"QTextEdit:focus {{ border-color: rgba(10,132,255,150); }}"
+            f"QTextEdit {{ background: transparent; border: none;"
+            f" color: {C_TEXT2}; padding: 10px 12px; }}"
+            "QScrollBar:vertical { background: transparent; width: 5px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,40);"
+            " border-radius: 2px; min-height: 24px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
         self.notes_editor.textChanged.connect(self._note_text_changed)
-        ew.addWidget(self.notes_editor)
-        pnl.addWidget(ed_wrap, 1)
+        pnl.addWidget(self.notes_editor, 1)
 
-        bar = QWidget()
-        bl = QHBoxLayout(bar)
-        bl.setContentsMargins(14, 0, 14, 12)
-        bl.setSpacing(8)
-        b_new = _pill("+ Not")
-        b_new.clicked.connect(self._add_note)
-        b_del = _pill("Sil")
-        b_del.setStyleSheet(
-            f"QPushButton {{ background: rgba(255,69,58,36); color: {C_RED}; border: none;"
-            f" border-radius: {R_BTN}px; padding: 0 12px; }}"
-            "QPushButton:hover { background: rgba(255,69,58,64); }"
-        )
-        b_del.clicked.connect(self._delete_note)
-        b_ref = _pill("↻", width=24)
-        b_ref.clicked.connect(self._notes_load)
-        hint = QLabel("1,5 sn otomatik kayıt")
-        hint.setFont(_f(11))
+        bar, bl = self._foot_row()
+        hint = QLabel("otomatik kayıt · 1,5 sn")
+        hint.setFont(_f(10))
         hint.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
-        bl.addWidget(b_new)
-        bl.addWidget(b_del)
+        b_new = _flat("+ Not")
+        b_new.clicked.connect(self._add_note)
+        b_ref = _flat("↻")
+        b_ref.clicked.connect(self._notes_load)
+        b_del = _flat("Sil", color=C_RED)
+        b_del.clicked.connect(self._delete_note)
         bl.addWidget(hint)
         bl.addStretch()
+        bl.addWidget(b_new)
+        bl.addWidget(b_ref)
+        bl.addWidget(b_del)
+        pnl.addWidget(bar)
+        return page
+
+    def _build_twitter_page(self):
+        page = QWidget()
+        pnl = QVBoxLayout(page)
+        pnl.setContentsMargins(0, 0, 0, 0)
+        pnl.setSpacing(0)
+
+        # başlık: 𝕏 + okunmamış rozeti + tümünü okundu işaretle
+        head = QWidget()
+        head.setObjectName("headrow")
+        head.setStyleSheet(f"#headrow {{ border-bottom: 1px solid {C_HAIRLINE}; }}")
+        h = QHBoxLayout(head)
+        h.setContentsMargins(12, 8, 12, 7)
+        h.setSpacing(7)
+        title = QLabel("𝕏")
+        title.setFont(_f(12, QFont.DemiBold))
+        title.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+        self.lbl_tw_count = QLabel("")
+        self.lbl_tw_count.setFont(_f(9, QFont.Bold))
+        self.lbl_tw_count.setStyleSheet(
+            f"color: #ffffff; background: {C_RED}; border-radius: 4px; padding: 1px 5px;"
+        )
+        self.lbl_tw_count.setVisible(False)
+        self.btn_tw_read = _flat("tümünü okundu işaretle")
+        self.btn_tw_read.setFont(_f(10))
+        self.btn_tw_read.clicked.connect(self._twitter_mark_read)
+        self.btn_tw_read.setVisible(False)
+        self.lbl_twitter_status = QLabel("")
+        self.lbl_twitter_status.setFont(_f(10))
+        self.lbl_twitter_status.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        h.addWidget(title)
+        h.addWidget(self.lbl_tw_count)
+        h.addWidget(self.lbl_twitter_status)
+        h.addStretch()
+        h.addWidget(self.btn_tw_read)
+        pnl.addWidget(head)
+
+        # sembol çipleri
+        self.tw_chips = QWidget()
+        self.tw_chips.setObjectName("chiprow")
+        self.tw_chips.setStyleSheet(f"#chiprow {{ border-bottom: 1px solid {C_HAIRLINE}; }}")
+        self.tw_chips_layout = QHBoxLayout(self.tw_chips)
+        self.tw_chips_layout.setContentsMargins(12, 6, 12, 7)
+        self.tw_chips_layout.setSpacing(4)
+        self.tw_chips_layout.setAlignment(Qt.AlignLeft)
+        pnl.addWidget(self.tw_chips)
+
+        # akış
+        self.twitter_host = QWidget()
+        self.twitter_host.setStyleSheet("background: transparent;")
+        self.twitter_layout = QVBoxLayout(self.twitter_host)
+        self.twitter_layout.setContentsMargins(0, 0, 0, 6)
+        self.twitter_layout.setSpacing(0)
+        self.twitter_layout.setAlignment(Qt.AlignTop)
+        pnl.addWidget(self._scroll_area(self.twitter_host), 1)
+
+        bar, bl = self._foot_row()
+        self.lbl_tw_time = QLabel("son: —")
+        self.lbl_tw_time.setFont(_f(10))
+        self.lbl_tw_time.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
+        b_ref = _flat("↻ Yenile")
+        b_ref.clicked.connect(self._twitter_load)
+        b_add_sym = _flat("+ Sembol")
+        b_add_sym.clicked.connect(self._twitter_add_symbol)
+        bl.addWidget(self.lbl_tw_time)
+        bl.addStretch()
+        bl.addWidget(b_add_sym)
         bl.addWidget(b_ref)
         pnl.addWidget(bar)
         return page
+
+    # ── 𝕏 yardımcıları ──────────────────────────────────────────────────
+    def _twitter_query(self):
+        return twitter_query(self._tw_symbols)
+
+    def _twitter_add_symbol(self):
+        existing = list(self._tw_symbols)
+        dlg = StockPickerSheet(existing=existing, parent=self)
+        dlg.exec()
+        sym = (dlg.value or "").upper()
+        if sym and sym not in self._tw_symbols:
+            self._tw_symbols.append(sym)
+            save_tw_symbols(self._tw_symbols)
+            self._twitter_load()
+
+    def _twitter_remove_symbol(self, sym):
+        if sym in self._tw_symbols:
+            self._tw_symbols.remove(sym)
+            if self._tw_filter == sym:
+                self._tw_filter = None
+            save_tw_symbols(self._tw_symbols)
+            self._twitter_load()   # sorgu değişti; yeni akışı çek
+
+    def _twitter_token(self):
+        return config.TWITTER_BEARER_TOKEN
+
+    def _twitter_mark_read(self):
+        self._tw_hl.clear()
+        self._tw_unread.clear()
+        self._update_tab_badge()
+        self._twitter_render()
+
+    def _twitter_chip(self, label, count, active, on_click, removable=False):
+        w = QWidget()
+        w.setCursor(Qt.PointingHandCursor)
+        w.setObjectName("chip")
+        bg = C_BLUE if active else "rgba(255,255,255,18)"
+        fg = "#ffffff" if active else C_TEXT3
+        w.setStyleSheet(
+            f"#chip {{ background: {bg}; border-radius: 5px; }}"
+            f"#chip:hover {{ background: {C_BLUE if active else 'rgba(255,255,255,34)'}; }}"
+        )
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(7, 2, 7 if not removable else 3, 3)
+        lay.setSpacing(4)
+        lbl = QLabel(label)
+        lbl.setFont(_f(10, QFont.DemiBold))
+        lbl.setStyleSheet(f"color: {fg}; background: transparent;")
+        cnt = QLabel(str(count))
+        cnt.setFont(_f(10))
+        cnt.setStyleSheet(f"color: {fg if active else C_TEXT4}; background: transparent;")
+        lay.addWidget(lbl)
+        lay.addWidget(cnt)
+        if removable:
+            x_btn = QLabel("×")
+            x_btn.setFont(_f(11))
+            x_btn.setStyleSheet(f"color: {C_TEXT3}; background: transparent; padding: 0 2px;")
+            x_btn.setCursor(Qt.PointingHandCursor)
+            x_btn.mousePressEvent = lambda e, s=label: (e.accept(), self._twitter_remove_symbol(s))
+            lay.addWidget(x_btn)
+        w.mousePressEvent = lambda e, cb=on_click: cb()
+        return w
+
+    def _twitter_row(self, tw, user, unread, symbol):
+        row = QWidget()
+        row.setObjectName("twrow")
+        row.setAttribute(Qt.WA_StyledBackground, True)
+        row.setCursor(Qt.PointingHandCursor)
+        row.setStyleSheet(
+            f"#twrow {{ background: {C_TINT_NEW if unread else 'transparent'};"
+            f" border-bottom: 1px solid {C_HAIRLINE}; }}"
+            f"#twrow:hover {{ background: {C_ROW_HOVER}; }}"
+        )
+        tweet_url = f"https://twitter.com/i/web/status/{tw.get('id', '')}"
+        row.mousePressEvent = lambda e, u=tweet_url: subprocess.Popen(["open", u])
+
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(12, 7, 12, 8)
+        lay.setSpacing(8)
+
+        dot = QLabel()
+        dot.setFixedSize(6, 6)
+        dot.setStyleSheet(
+            f"background: {C_BLUE if unread else 'transparent'}; border-radius: 3px;"
+        )
+        dot_wrap = QWidget()
+        dot_wrap.setFixedWidth(6)
+        dw = QVBoxLayout(dot_wrap)
+        dw.setContentsMargins(0, 4, 0, 0)
+        dw.setSpacing(0)
+        dw.addWidget(dot)
+        dw.addStretch()
+        lay.addWidget(dot_wrap)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(3)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+        uname = user.get("username") or user.get("name") or "—"
+        lbl_user = QLabel("@" + uname)
+        lbl_user.setFont(_f(11, QFont.DemiBold))
+        lbl_user.setStyleSheet(
+            f"color: {C_TEXT if unread else C_TEXT2}; background: transparent;"
+        )
+        top.addWidget(lbl_user)
+        if symbol:
+            chip = QLabel(symbol)
+            chip.setFont(_f(9, QFont.DemiBold))
+            chip.setStyleSheet(
+                f"color: {C_TEXT2 if unread else C_TEXT4};"
+                " background: rgba(255,255,255,20); border-radius: 3px; padding: 0 4px;"
+            )
+            top.addWidget(chip)
+        top.addStretch()
+        ts = tw.get("created_at", "")
+        lbl_ts = QLabel(_tw_ago(ts))
+        lbl_ts.setFont(_f(10))
+        lbl_ts.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
+        top.addWidget(lbl_ts)
+        body.addLayout(top)
+
+        text = " ".join(tw.get("text", "").split())
+        lbl_text = QLabel(text)
+        lbl_text.setFont(_f(11))
+        lbl_text.setWordWrap(True)
+        lbl_text.setStyleSheet(
+            f"color: {C_TEXT2 if unread else C_TEXT3}; background: transparent;"
+        )
+        body.addWidget(lbl_text)
+        lay.addLayout(body, 1)
+        return row
+
+    def _twitter_render(self):
+        for i in reversed(range(self.twitter_layout.count())):
+            w = self.twitter_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        for i in reversed(range(self.tw_chips_layout.count())):
+            w = self.tw_chips_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+        tweets = self._tw_tweets
+        syms = self._tw_symbols
+
+        def sym_of(tw):
+            return symbol_of_tweet(tw.get("text", ""), syms)
+
+        counts = {}
+        for tw in tweets:
+            s = sym_of(tw)
+            if s:
+                counts[s] = counts.get(s, 0) + 1
+
+        self.tw_chips_layout.addWidget(self._twitter_chip(
+            "Tümü", len(tweets), self._tw_filter is None,
+            lambda: self._twitter_set_filter(None)))
+        for s in syms:
+            self.tw_chips_layout.addWidget(self._twitter_chip(
+                s, counts.get(s, 0), self._tw_filter == s,
+                lambda sym=s: self._twitter_set_filter(sym),
+                removable=True))
+
+        shown = [tw for tw in tweets
+                 if self._tw_filter is None or sym_of(tw) == self._tw_filter]
+        if not shown:
+            lbl = QLabel("Gösterilecek tweet yok.")
+            lbl.setFont(_f(11))
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(f"color: {C_TEXT3}; background: transparent; padding: 18px 0;")
+            self.twitter_layout.addWidget(lbl)
+        else:
+            for tw in shown:
+                unread = tw.get("id", "") in self._tw_hl
+                user = self._tw_users.get(tw.get("author_id", ""), {})
+                self.twitter_layout.addWidget(
+                    self._twitter_row(tw, user, unread, sym_of(tw)))
+
+        n = len(self._tw_hl)
+        self.lbl_tw_count.setText(str(n))
+        self.lbl_tw_count.setVisible(n > 0)
+        self.btn_tw_read.setVisible(n > 0)
+        self.lbl_twitter_status.setText(f"{len(tweets)} tweet" if tweets else "")
+
+    def _twitter_set_filter(self, sym):
+        self._tw_filter = sym
+        self._twitter_render()
+
+    def _twitter_load(self):
+        from datetime import datetime
+        self.lbl_twitter_status.setText("yükleniyor…")
+        token = self._twitter_token()
+        if not token:
+            self._tw_tweets = []
+            self._twitter_render()
+            self.lbl_twitter_status.setText("token yok")
+            return
+        try:
+            url = (
+                "https://api.twitter.com/2/tweets/search/recent"
+                f"?query={urllib.parse.quote(self._twitter_query())}&max_results=20"
+                "&tweet.fields=created_at,author_id,text"
+                "&expansions=author_id&user.fields=username,name"
+            )
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+
+            self._tw_tweets = data.get("data", [])
+            self._tw_users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
+            incoming = {tw.get("id", "") for tw in self._tw_tweets}
+            had_seen = bool(self._tw_seen)
+            new_ids, self._tw_seen = compute_unread(
+                incoming, self._tw_seen, active=(self._mode == 3))
+            if had_seen:
+                self._tw_hl = new_ids
+                if self._mode != 3:
+                    self._tw_unread |= new_ids
+            else:
+                self._tw_hl = set()
+            self._tw_last = datetime.now().strftime("%H:%M")
+            self.lbl_tw_time.setText(f"son: {self._tw_last}")
+            self._twitter_render()
+            self._update_tab_badge()
+        except urllib.error.HTTPError as e:
+            self._tw_tweets = []
+            self._twitter_render()
+            self.lbl_twitter_status.setText(f"hata {e.code}")
+        except Exception:
+            self._tw_tweets = []
+            self._twitter_render()
+            self.lbl_twitter_status.setText("hata")
+
+    def _twitter_poll(self):
+        threading.Thread(target=self._twitter_poll_worker, daemon=True).start()
+
+    def _twitter_poll_worker(self):
+        """Arka plan thread — SADECE ağdan id çeker, state'e dokunmaz."""
+        token = self._twitter_token()
+        if not token:
+            return
+        try:
+            url = (
+                "https://api.twitter.com/2/tweets/search/recent"
+                f"?query={urllib.parse.quote(self._twitter_query())}&max_results=20"
+                "&tweet.fields=id"
+            )
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            incoming = {tw.get("id", "") for tw in data.get("data", [])}
+            # State değişikliği ana thread'de yapılsın diye sinyalle ilet.
+            self.tw_poll_result.emit(incoming)
+        except Exception:
+            pass
+
+    def _twitter_poll_apply(self, incoming):
+        """Ana thread — poll sonucunu state'e uygula (thread-safe)."""
+        new_ids, self._tw_seen = compute_unread(
+            incoming, self._tw_seen, active=(self._mode == 3))
+        if new_ids and self._mode != 3:
+            self._tw_unread |= new_ids
+            self._tw_hl |= new_ids
+            self._update_tab_badge()
 
     # ── Panel aç/kapat ──────────────────────────────────────────────────
     def _quit_menu(self, event):
@@ -974,13 +1594,20 @@ class OverlayWindow(QWidget):
             self._mode = mode
             self.stocks_page.setVisible(mode == 1)
             self.notes_page.setVisible(mode == 2)
+            self.twitter_page.setVisible(mode == 3)
             if mode == 1 and prev == 0:
                 self._stocks_refresh()
             if mode == 2 and prev == 0:
                 self._notes_load()
+            if mode == 3 and prev == 0:
+                self._twitter_load()
+            if mode == 3:
+                self._tw_unread.clear()
+                self._update_tab_badge()
             target_w = PANEL_W
         self._paint_tab(self.tab_stock, self._mode == 1)
         self._paint_tab(self.tab_notes, self._mode == 2)
+        self._paint_tab(self.tab_twitter, self._mode == 3)
         self._anim.stop()
         self._anim.setStartValue(min(self.panel.maximumWidth(), PANEL_W))
         self._anim.setEndValue(target_w)
@@ -999,41 +1626,39 @@ class OverlayWindow(QWidget):
         return super().eventFilter(obj, event)
 
     def _install_global_mouse_monitor(self):
+        if not _APPKIT_OK:
+            return
         try:
-            from AppKit import NSEvent
             mask = (1 << 1) | (1 << 3)  # NSLeftMouseDown | NSRightMouseDown
 
             def handler(nsevent):
                 if self._mode == 0:
                     return
-                from AppKit import NSScreen
-                loc = NSEvent.mouseLocation()
-                sh = NSScreen.mainScreen().frame().size.height
-                gx = int(loc.x)
-                gy = int(sh - loc.y)
-                from PySide6.QtCore import QPoint
-                if not self.geometry().contains(QPoint(gx, gy)):
+                loc = _NSEvent.mouseLocation()
+                sh = _NSScreen.mainScreen().frame().size.height
+                if not self.geometry().contains(QPoint(int(loc.x), int(sh - loc.y))):
                     QTimer.singleShot(0, lambda m=self._mode: self._toggle(m) if self._mode != 0 else None)
 
-            self._ns_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
+            self._ns_monitor = _NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
+            # Global monitor olay-tabanlı çalışıyor; 150ms polling yedeğine gerek yok.
+            if self._ns_monitor is not None and hasattr(self, "_outside_click_timer"):
+                self._outside_click_timer.stop()
         except Exception as e:
             print("global mouse monitor hatası:", e)
 
     def _check_outside_click(self):
-        if self._mode == 0:
+        if self._mode == 0 or not _APPKIT_OK:
             return
         try:
-            from AppKit import NSEvent, NSScreen
-            buttons = NSEvent.pressedMouseButtons()
-            if not (buttons & 0b11):  # sol veya sağ buton basılı değil
+            buttons = _NSEvent.pressedMouseButtons()
+            if not (buttons & 0b11):
                 self._was_pressed = False
                 return
             if getattr(self, '_was_pressed', False):
                 return
             self._was_pressed = True
-            loc = NSEvent.mouseLocation()
-            sh = NSScreen.mainScreen().frame().size.height
-            from PySide6.QtCore import QPoint
+            loc = _NSEvent.mouseLocation()
+            sh = _NSScreen.mainScreen().frame().size.height
             pt = QPoint(int(loc.x), int(sh - loc.y))
             if not self.geometry().contains(pt):
                 self._toggle(self._mode)
@@ -1052,22 +1677,19 @@ class OverlayWindow(QWidget):
                 self._clear_layout(item.layout())
 
     def _rebuild_rows(self):
+        # Rebuild widget'ları yok eder; sparkline geçmişini koru
+        for sym, row in self.rows.items():
+            sp = getattr(row, "spark", None)
+            if sp is not None and sp._points:
+                self._spark_history[sym] = (list(sp._points), sp._up)
+
         self.rows.clear()
         self.headers.clear()
         self.lbl_empty.setParent(None)
         self._clear_layout(self.rows_layout)
 
         order = []
-        groups = []           # [(sep_uid or None, [stock dicts])]
-        current = (None, [])
-        for s in self.stocks:
-            sym = s["symbol"]
-            if sym.startswith(_SEP_SYMBOL):
-                groups.append(current)
-                current = (sym, [])
-            else:
-                current[1].append(s)
-        groups.append(current)
+        groups = group_stocks(self.stocks)   # [(sep_uid or None, [stock dicts])]
 
         for uid, items in groups:
             if uid is None and not items:
@@ -1075,7 +1697,7 @@ class OverlayWindow(QWidget):
             section = QWidget()
             sv = QVBoxLayout(section)
             sv.setContentsMargins(0, 0, 0, 0)
-            sv.setSpacing(5)
+            sv.setSpacing(2)
 
             collapsed = self._collapsed_sections.get(uid, False) if uid else False
             if uid is not None:
@@ -1090,7 +1712,7 @@ class OverlayWindow(QWidget):
 
             card = QWidget()
             card.setObjectName("card")
-            card.setStyleSheet(f"#card {{ background: {C_CARD}; border-radius: {R_CARD}px; }}")
+            card.setStyleSheet("#card { background: transparent; }")
             cv = QVBoxLayout(card)
             cv.setContentsMargins(0, 0, 0, 0)
             cv.setSpacing(0)
@@ -1100,9 +1722,10 @@ class OverlayWindow(QWidget):
                 sym = s["symbol"]
                 if self._filter and self._filter not in sym.upper():
                     continue
-                if visible_rows > 0:
-                    cv.addWidget(_hairline())
                 row = StockRow(sym, s.get("entry"), s.get("exit"))
+                hist = self._spark_history.get(sym)
+                if hist:
+                    row.spark.restore(hist[0], hist[1])
                 row.remove_requested.connect(self._remove_stock)
                 row.levels_changed.connect(self._update_levels)
                 cv.addWidget(row)
@@ -1125,10 +1748,15 @@ class OverlayWindow(QWidget):
 
     # ── Arama ───────────────────────────────────────────────────────────
     def _on_search(self, text):
+        # Anlık: sadece "Ekle" butonu görünürlüğü (ucuz)
         q = text.strip().upper()
         self._filter = q
         known = any(s["symbol"].upper() == q for s in self.stocks)
         self.btn_add_inline.setVisible(len(q) >= 3 and not known)
+        # Gecikmeli: liste yeniden kurma (200ms yazma durunca)
+        self._search_timer.start(200)
+
+    def _apply_search_filter(self):
         self._rebuild_rows()
         self._apply_cached_prices()
 
@@ -1146,22 +1774,18 @@ class OverlayWindow(QWidget):
 
     # ── Sürükle-bırak ───────────────────────────────────────────────────
     def _on_dropped(self, moved, target):
-        idx = next((i for i, s in enumerate(self.stocks) if s["symbol"] == moved), None)
-        if idx is None:
+        new_order = reorder(self.stocks, moved, target)
+        if new_order == self.stocks:
             return
-        item = self.stocks.pop(idx)
-        if target is None or target == moved:
-            self.stocks.append(item)
-        else:
-            tgt = next((i for i, s in enumerate(self.stocks) if s["symbol"] == target), len(self.stocks))
-            self.stocks.insert(tgt, item)
+        self.stocks = new_order
         save_stocks(self.stocks)
         self._rebuild_rows()
         self._apply_cached_prices()
 
     # ── Hisse işlemleri ─────────────────────────────────────────────────
     def _add_stock(self):
-        dlg = TextSheet("Hisse ekle", "BIST sembolü (örn. THYAO)", parent=self)
+        existing = [s["symbol"] for s in self.stocks]
+        dlg = StockPickerSheet(existing=existing, parent=self)
         dlg.exec()
         sym = (dlg.value or "").upper()
         if not sym or any(s["symbol"] == sym for s in self.stocks):
@@ -1176,13 +1800,7 @@ class OverlayWindow(QWidget):
         dlg.exec()
         if dlg.value is None:
             return
-        counters = []
-        for s in self.stocks:
-            if s["symbol"].startswith(_SEP_SYMBOL):
-                _, c = _parse_sep_symbol(s["symbol"])
-                if c.isdigit():
-                    counters.append(int(c))
-        counter = (max(counters) + 1) if counters else 0
+        counter = next_separator_counter(self.stocks)
         self.stocks.append({"symbol": f"{_SEP_SYMBOL}:{dlg.value}:{counter}", "entry": None, "exit": None})
         save_stocks(self.stocks)
         self._rebuild_rows()
@@ -1242,7 +1860,7 @@ class OverlayWindow(QWidget):
             return
         self._fetching = True
         self.lbl_stock_status.setText("Güncelleniyor…")
-        fetch_all(symbols, lambda r: QApplication.instance().data_signal.emit(r))
+        fetch_all(symbols, lambda r: self._signals.data_signal.emit(r))
 
     def apply_data(self, results):
         from datetime import datetime
@@ -1259,7 +1877,7 @@ class OverlayWindow(QWidget):
     # ── Notlar ──────────────────────────────────────────────────────────
     def _notes_load(self):
         self.lbl_notes_status.setText("Yükleniyor…")
-        fetch_notes(lambda notes: QApplication.instance().notes_signal.emit(notes if notes else []))
+        fetch_notes(lambda notes: self._signals.notes_signal.emit(notes if notes else []))
 
     def apply_notes(self, notes):
         if notes is None:

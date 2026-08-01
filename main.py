@@ -65,21 +65,19 @@ def main():
     app.setQuitOnLastWindowClosed(False)
 
     signals = _AppSignals()
-    app.data_signal  = signals.data_signal
-    app.notes_signal = signals.notes_signal
 
-    window = OverlayWindow()
+    window = OverlayWindow(signals)
     signals.data_signal.connect(window.apply_data)
     signals.notes_signal.connect(window.apply_notes)
     window.show()
 
-    # Başlangıçta ve sonra her 2 saniyede bir level'i yenile
-    # (macOS bazı durumlarda sıfırlayabilir)
+    # Başlangıçta bir kez ayarla, sonra seyrek yenile
+    # (macOS nadiren sıfırlar; 2sn agresif ve sürekli objc köprüsü yükü yaratıyordu)
     QTimer.singleShot(300, lambda: _set_window_level(window))
 
     keep_top = QTimer()
     keep_top.timeout.connect(lambda: _set_window_level(window))
-    keep_top.start(2000)
+    keep_top.start(15000)
     app._keep_top = keep_top
 
     sys.exit(app.exec())

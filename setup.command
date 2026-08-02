@@ -7,6 +7,10 @@ APP_PATH="$PROJ_DIR/EkranHisse.app"
 PLIST="$HOME/Library/LaunchAgents/com.local.ekranhisse.plist"
 LOG="$HOME/Library/Logs/EkranHisse.log"
 
+# İnternetten/zip'ten inen dosyalara macOS "quarantine" bayrağı yapıştırır ve
+# "geliştirici doğrulanamadı" hatası verir. Tüm pakete uygulanan bayrağı kaldır.
+xattr -dr com.apple.quarantine "$PROJ_DIR" 2>/dev/null || true
+
 clear
 echo "╔══════════════════════════════════════╗"
 echo "║       EkranHisse Kurulum             ║"
@@ -17,13 +21,22 @@ echo ""
 # ── 1. Python kontrolü ──────────────────────────────────────────────────
 echo "[ 1/4 ] Python kontrol ediliyor..."
 if ! command -v python3 &>/dev/null; then
+# ── 1. Python kontrolü ──────────────────────────────────────────────────
+echo "[ 1/4 ] Python kontrol ediliyor..."
+# Launcher (EkranHisse.app) özellikle /usr/bin/python3 ile başlatır; bağımlılıkları
+# DA aynı yorumlayıcıya kurmalıyız yoksa "No module named 'PySide6'" alınır.
+PY="/usr/bin/python3"
+if [ ! -x "$PY" ]; then
+    PY="$(command -v python3)"
+fi
+if [ -z "$PY" ]; then
     echo "  ✗ python3 bulunamadı."
     echo "    https://www.python.org adresinden Python 3 kurun."
     read -p "  Çıkmak için Enter'a basın..."
     exit 1
 fi
-PY_VER=$(python3 --version 2>&1)
-echo "  ✓ $PY_VER"
+PY_VER=$("$PY" --version 2>&1)
+echo "  ✓ $PY_VER  ($PY)"
 
 # ── 2. Bağımlılıklar ────────────────────────────────────────────────────
 echo ""
@@ -31,8 +44,8 @@ echo "[ 2/4 ] Bağımlılıklar kuruluyor..."
 echo "  (PySide6, yfinance, pyobjc — ilk kurulumda birkaç dakika sürebilir)"
 echo ""
 
-pip3 install -q --upgrade pip 2>/dev/null
-pip3 install -q PySide6 yfinance pyobjc-framework-Cocoa
+"$PY" -m pip install -q --upgrade pip 2>/dev/null
+"$PY" -m pip install -q --user PySide6 yfinance pyobjc-framework-Cocoa
 
 if [ $? -ne 0 ]; then
     echo "  ✗ Bağımlılık kurulumu başarısız."

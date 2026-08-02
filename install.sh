@@ -10,9 +10,10 @@ PLIST="$LAUNCH_AGENTS/com.local.ekranhisse.plist"
 echo "=== EkranHisse Kurulum ==="
 echo "Proje dizini: $PROJ_DIR"
 
-# Bağımlılıkları kur
+# Bağımlılıkları kur — launcher /usr/bin/python3 kullandığı için AYNI yorumlayıcıya kur
 echo "Bağımlılıklar kuruluyor..."
-pip3 install -q PySide6 yfinance pyobjc-framework-Cocoa
+PY="/usr/bin/python3"; [ -x "$PY" ] || PY="$(command -v python3)"
+"$PY" -m pip install -q --user PySide6 yfinance pyobjc-framework-Cocoa
 
 mkdir -p "$LAUNCH_AGENTS"
 

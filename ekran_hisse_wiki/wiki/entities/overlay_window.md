@@ -18,14 +18,15 @@ last_updated: 2026-08-06
 - **Notlar** — GitHub Gist üzerinden senkronlanan not paneli
 
 ## Veri akışı
-`main.py`'deki `_AppSignals` nesnesi üzerinden thread-safe signal/slot:
+`_AppSignals` nesnesi üzerinden thread-safe signal/slot:
 - `data_signal` → `apply_data()` — fiyat sonuçları
 - `notes_signal` → `apply_notes()` — not listesi
-- `rsi_signal` → `apply_rsi()` — RSI sonuçları
+
+> **Bilinen sorun (canlı doğrulandı, 2026-08-06):** `_fetch` içinde `_signals.rsi_signal.emit(...)` çağrılıyor (`overlay.py:2008`) ama `_AppSignals` üzerinde **`rsi_signal` tanımlı değil** → RSI thread'i her tetiklendiğinde `AttributeError` ile düşüyor. RSI zinciri baştan sona ölü. Ayrıntı: [[known_issues]].
 
 ## Timer'lar
 - Fiyat: 10 sn (`QTimer`)
-- RSI: 5 dk (`QTimer`), başlangıçta 3 sn gecikme
+- RSI: 5 dk (`QTimer`), başlangıçta 3 sn gecikme — ancak yukarıdaki nedenle sonuç üretmiyor.
 
 ## İlgili
 - [[sparkline]]
@@ -38,6 +39,7 @@ last_updated: 2026-08-06
 
 - [[architecture_overview]]
 - [[data_fetcher]]
+- [[known_issues]]
 - [[sparkline]]
 - [[stock_row]]
 <!-- BACKLINKS:END -->

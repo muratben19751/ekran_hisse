@@ -13,3 +13,4 @@ Bu sayfa `tools/wiki_tools.py index` tarafından her sayfanın frontmatter'ında
 
 ## Synthesis (karşılaştırmalar & rehberler)
 - [[architecture_overview|Mimari Genel Bakış]] — EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü, uygulama paketi, bağımlılıklar ve env-tabanlı sır yönetimi.  (`wiki/synthesis/architecture_overview.md`)
+- [[known_issues|Bilinen Sorunlar]] — EkranHisse'de DeepR review (11 boyut, adversarial verify) ve canlı çalıştırmayla doğrulanmış açık bug'lar ve teknik borç; öncelikli düzeltme listesi.  (`wiki/synthesis/known_issues.md`)

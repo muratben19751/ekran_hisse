@@ -23,7 +23,10 @@ Yükseklik: 26 px. Hover, sürükle-bırak (reorder), sağ tık context menu des
 ## Sinyaller
 - `remove_requested(str)` — listeden kaldır
 - `levels_changed(str, object, object)` — hedef güncelle
-- `reorder_started(str)` — sürükle-bırak başladı
+- `reorder_started(str)` — sürükle-bırak başladı (bağlı slot yok — etkisiz)
+
+## RSI
+`update_rsi(self, rsi)` metodu tanımlı ama gövdesi yalnızca `pass` (`overlay.py:718-719`) — RSI hiçbir yerde gösterilmiyor. Veri katmanındaki tüm RSI hesabı boşa gidiyor. Bkz: [[known_issues]].
 
 ## İlgili
 - [[sparkline]]
@@ -35,6 +38,7 @@ Yükseklik: 26 px. Hover, sürükle-bırak (reorder), sağ tık context menu des
 
 - [[architecture_overview]]
 - [[data_fetcher]]
+- [[known_issues]]
 - [[overlay_window]]
 - [[sparkline]]
 <!-- BACKLINKS:END -->

@@ -34,6 +34,7 @@ Ayrı bir TV chart session açar; 5/15/30/60 dk RSI hesaplar. `_calc_rsi()` ile 
 ## Referenced by
 
 - [[architecture_overview]]
+- [[known_issues]]
 - [[overlay_window]]
 - [[stock_row]]
 <!-- BACKLINKS:END -->

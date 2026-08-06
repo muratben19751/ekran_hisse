@@ -54,10 +54,12 @@ Tüm sırlar git-izlenmeyen `notes_config.env`'de tutulur ve `config.py` üzerin
 - [[data_fetcher]]
 - [[sparkline]]
 - [[stock_row]]
+- [[known_issues]]
 
 <!-- BACKLINKS:BEGIN -->
 ## Referenced by
 
 - [[data_fetcher]]
+- [[known_issues]]
 - [[overlay_window]]
 <!-- BACKLINKS:END -->

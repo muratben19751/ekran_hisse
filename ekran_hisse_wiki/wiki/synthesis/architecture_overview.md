@@ -1,7 +1,7 @@
 ---
 title: Mimari Genel Bakış
 type: synthesis
-summary: EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü ve uygulama paketi.
+summary: EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü, uygulama paketi, bağımlılıklar ve env-tabanlı sır yönetimi.
 sources:
   - sources/01_proje_ozet.md
 last_updated: 2026-08-06
@@ -38,7 +38,13 @@ TradingView WebSocket
 - Thread → UI köprüsü: `Signal/Slot` (`_AppSignals` QObject)
 
 ## Uygulama paketi senkronizasyonu
-`EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. Değişiklik sonrası manuel sync gerekir.
+`EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. Değişiklik sonrası manuel sync gerekir (kök → bundle). **Tek aktif kaynak proje köküdür**; eski `uygulama/` kopyası ve `overlay_*_yedek.py`/`overlay_eski.py`/`overlay 2.py` yedekleri (~7300 satır ölü kod) kaldırıldı — bundan sonra yalnızca kök + bundle senkronu takip edilir.
+
+## Bağımlılıklar
+`requirements.txt` tek kaynaktır: `PySide6`, `yfinance`, `websocket-client`, `requests`, `pyobjc-framework-Cocoa`. `websocket-client`+`requests` veri katmanının (bkz. [[data_fetcher]]), `pyobjc` ise macOS pencere davranışının zorunlu bağımlılıklarıdır. `install.sh` ve `setup.command` artık elle paket listesi yerine `pip install -r requirements.txt` çağırır.
+
+## Güvenlik ve yapılandırma
+Tüm sırlar git-izlenmeyen `notes_config.env`'de tutulur ve `config.py` üzerinden tek noktadan okunur: `GIST_ID`, `GITHUB_TOKEN`, `TWITTER_BEARER_TOKEN`, `TV_SESSION_ID`. TradingView `sessionid` çerezi koddan çıkarılıp env'e taşındı (daha önce `data_fetcher.py`'de hardcoded'dı). `.app` bundle'ı da kendi `notes_config.env` kopyasını taşır.
 
 ## Bundle launcher
 `Contents/MacOS/EkranHisse` → `arch -arm64 /usr/bin/python3 -W ignore main.py` → log: `~/Library/Logs/EkranHisse.log`
@@ -52,5 +58,6 @@ TradingView WebSocket
 <!-- BACKLINKS:BEGIN -->
 ## Referenced by
 
+- [[data_fetcher]]
 - [[overlay_window]]
 <!-- BACKLINKS:END -->

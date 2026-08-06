@@ -34,3 +34,4 @@ def get(key, default=""):
 GIST_ID              = get("GIST_ID")
 GITHUB_TOKEN         = get("GITHUB_TOKEN")
 TWITTER_BEARER_TOKEN = get("TWITTER_BEARER_TOKEN")
+TV_SESSION_ID        = get("TV_SESSION_ID")

@@ -1,2 +1,5 @@
 PySide6>=6.5.0
 yfinance>=0.2.30
+websocket-client>=1.6.0
+requests>=2.31.0
+pyobjc-framework-Cocoa>=9.0

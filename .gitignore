@@ -9,12 +9,6 @@ notes_data.json
 .ekranhisse.lock
 tw_symbols.json
 
-# Yedek / eski overlay sürümleri
-overlay 2.py
-overlay_eski.py
-overlay_1b_yedek.py
-overlay_inceleme_oncesi_yedek.py
-
 # Tasarım paketleri ve alakasız dosyalar
 *.zip
 test.php

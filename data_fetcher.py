@@ -9,16 +9,20 @@ import time
 
 import websocket
 
+import config
+
 TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
-TV_SESSION_ID = "osbbjahxxdb3k4bw6sf4momoema3rtef"
+TV_SESSION_ID = config.TV_SESSION_ID
 
 _tv_auth_token_cache = [None]
 
 def _get_tv_auth_token() -> str:
     if _tv_auth_token_cache[0]:
         return _tv_auth_token_cache[0]
+    if not TV_SESSION_ID:
+        return "unauthorized_user_token"
     try:
-        import requests, re
+        import requests
         s = requests.Session()
         s.headers.update({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"})
         s.cookies.set("sessionid", TV_SESSION_ID, domain=".tradingview.com")

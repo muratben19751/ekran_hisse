@@ -41,11 +41,11 @@ echo "  ✓ $PY_VER  ($PY)"
 # ── 2. Bağımlılıklar ────────────────────────────────────────────────────
 echo ""
 echo "[ 2/4 ] Bağımlılıklar kuruluyor..."
-echo "  (PySide6, yfinance, pyobjc — ilk kurulumda birkaç dakika sürebilir)"
+echo "  (PySide6, yfinance, websocket-client, requests, pyobjc — ilk kurulumda birkaç dakika sürebilir)"
 echo ""
 
 "$PY" -m pip install -q --upgrade pip 2>/dev/null
-"$PY" -m pip install -q --user PySide6 yfinance pyobjc-framework-Cocoa
+"$PY" -m pip install -q --user -r "$PROJ_DIR/requirements.txt"
 
 if [ $? -ne 0 ]; then
     echo "  ✗ Bağımlılık kurulumu başarısız."

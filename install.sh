@@ -13,7 +13,7 @@ echo "Proje dizini: $PROJ_DIR"
 # Bağımlılıkları kur — launcher /usr/bin/python3 kullandığı için AYNI yorumlayıcıya kur
 echo "Bağımlılıklar kuruluyor..."
 PY="/usr/bin/python3"; [ -x "$PY" ] || PY="$(command -v python3)"
-"$PY" -m pip install -q --user PySide6 yfinance pyobjc-framework-Cocoa
+"$PY" -m pip install -q --user -r "$PROJ_DIR/requirements.txt"
 
 mkdir -p "$LAUNCH_AGENTS"
 

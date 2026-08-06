@@ -38,6 +38,7 @@ from overlay import OverlayWindow
 class _AppSignals(QObject):
     data_signal  = Signal(list)
     notes_signal = Signal(object)  # None veya list
+    rsi_signal   = Signal(str, object)  # symbol, {5:x, 15:x, 30:x, 60:x}
 
 
 try:
@@ -69,6 +70,7 @@ def main():
     window = OverlayWindow(signals)
     signals.data_signal.connect(window.apply_data)
     signals.notes_signal.connect(window.apply_notes)
+    signals.rsi_signal.connect(window.apply_rsi)
     window.show()
 
     # Başlangıçta bir kez ayarla, sonra seyrek yenile

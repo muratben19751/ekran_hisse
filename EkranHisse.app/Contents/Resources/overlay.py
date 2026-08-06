@@ -21,14 +21,14 @@ except Exception:
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint, QEvent
 )
-from PySide6.QtGui import QFont, QPainter, QColor, QDrag, QPixmap
+from PySide6.QtGui import QFont, QPainter, QColor, QDrag, QPixmap, QPen, QPainterPath
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QApplication,
     QSizePolicy, QMenu, QListWidget, QTextEdit, QLineEdit, QDialog,
     QScrollArea, QFrame,
 )
 
-from data_fetcher import fetch_all
+from data_fetcher import fetch_all, fetch_tv_rsi
 from notes_api_client import fetch_notes, save_notes
 import config
 from logic import (
@@ -565,7 +565,11 @@ class TargetBar(QWidget):
 
 # ── Satırlar ────────────────────────────────────────────────────────────────
 class Sparkline(QWidget):
-    """Oturum boyunca biriken fiyatlardan mini çubuk grafik."""
+    """Pseudo Heikin-Ashi sparkline — biriktirilen close fiyatlarından.
+    HA_open[i] = (HA_open[i-1] + HA_close[i-1]) / 2
+    HA_close[i] = close[i]   (sadece close ile yaklaşım)
+    Yeşil mum: HA_close >= HA_open, Kırmızı: HA_close < HA_open
+    """
 
     MAX = 24
 
@@ -579,7 +583,6 @@ class Sparkline(QWidget):
         self._up = True
 
     def restore(self, points, up):
-        """Rebuild sonrası birikmiş geçmişi geri yükle."""
         self._points = list(points)[-self.MAX:]
         self._up = bool(up)
         self.update()
@@ -588,31 +591,60 @@ class Sparkline(QWidget):
         if price is None:
             return
         self._up = bool(up)
-        if not self._points or abs(self._points[-1] - price) > 1e-9:
-            self._points.append(price)
-            if len(self._points) > self.MAX:
-                self._points = self._points[-self.MAX:]
+        self._points.append(price)
+        if len(self._points) > self.MAX:
+            self._points = self._points[-self.MAX:]
         self.update()
+
+    @staticmethod
+    def _ha_candles(closes):
+        """Pseudo-HA: open ve close hesapla."""
+        candles = []
+        ha_open = closes[0]
+        for c in closes:
+            ha_close = c
+            candles.append((ha_open, ha_close))
+            ha_open = (ha_open + ha_close) / 2
+        return candles
 
     def paintEvent(self, _):
         pts = self._points
-        if len(pts) < 2:
+        n = len(pts)
+        if n < 2:
             return
+        w, h = self.width(), self.height()
+        if w < 4 or h < 2:
+            return
+
+        candles = self._ha_candles(pts)
+        all_vals = [v for o, c in candles for v in (o, c)]
+        lo, hi = min(all_vals), max(all_vals)
+        span = (hi - lo) or 1.0
+
+        GAP = 1
+        cw = max(2, (w - GAP * (n - 1)) // n)   # mum genişliği
+
+        def vy(v):
+            return PAD + (1.0 - (v - lo) / span) * (h - 2 * PAD)
+
+        PAD = 1.0
         p = QPainter(self)
         p.setPen(Qt.NoPen)
-        w, h = self.width(), self.height()
-        n = len(pts)
-        bw = max(1.0, (w - (n - 1)) / n)
-        lo, hi = min(pts), max(pts)
-        span = (hi - lo) or 1.0
-        for i, v in enumerate(pts):
-            frac = 0.25 + 0.75 * ((v - lo) / span)
-            bh = max(2, int(h * frac))
-            c = QColor(C_GREEN if self._up else C_RED)
-            c.setAlpha(min(255, 95 + int(140 * (i + 1) / n)))
-            p.setBrush(c)
-            p.drawRect(int(i * (bw + 1)), h - bh, max(1, int(bw)), bh)
+
+        for i, (ha_open, ha_close) in enumerate(candles):
+            x = int(i * (cw + GAP))
+            bull = ha_close >= ha_open
+            color = QColor(C_GREEN if bull else C_RED)
+            y_top = int(vy(max(ha_open, ha_close)))
+            y_bot = int(vy(min(ha_open, ha_close)))
+            body_h = max(1, y_bot - y_top)
+            p.setBrush(color)
+            p.drawRect(x, y_top, cw, body_h)
+
         p.end()
+
+
+
 
 
 class StockRow(QWidget):
@@ -631,7 +663,14 @@ class StockRow(QWidget):
         self.setFixedHeight(26)
         self.setCursor(Qt.PointingHandCursor)
 
-        lay = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        top = QWidget()
+        top.setFixedHeight(26)
+        top.setStyleSheet("background: transparent;")
+        lay = QHBoxLayout(top)
         lay.setContentsMargins(12, 0, 12, 0)
         lay.setSpacing(8)
 
@@ -670,10 +709,14 @@ class StockRow(QWidget):
         lay.addWidget(self.lbl_price)
         lay.addWidget(self.lbl_pct)
 
+        outer.addWidget(top)
+
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._ctx_menu)
         self._sync_target()
 
+    def update_rsi(self, rsi: dict):
+        pass
     # görünüm ------------------------------------------------------------
     def _paint_bg(self):
         tint = C_TINT_TGT if self._reached else "transparent"
@@ -703,7 +746,7 @@ class StockRow(QWidget):
             self.setToolTip("")
         self._paint_bg()
 
-    def update_data(self, price, change_pct):
+    def update_data(self, price, change_pct, volume=None, avg_volume=None):
         self._price = price
         self.lbl_price.setText("—" if price is None else _tr(price))
         if change_pct is None:
@@ -919,6 +962,7 @@ class OverlayWindow(QWidget):
         self.rows = {}
         self.headers = {}
         self._spark_history = {}   # {symbol: (points, up)} — rebuild'ler arası korunur
+        self._rsi_cache = {}       # {symbol: {5:x,15:x,30:x,60:x}} — rebuild'ler arası korunur
         self._collapsed_sections = {}
         self._filter = ""
 
@@ -930,6 +974,8 @@ class OverlayWindow(QWidget):
         self._tw_users = {}
         self._tw_last = "—"
         self._tw_symbols = load_tw_symbols()   # izlenen semboller (kalıcı)
+
+        self._pinned = False
 
         self._notes = []
         self._current_note = None
@@ -982,6 +1028,11 @@ class OverlayWindow(QWidget):
         self.tw_poll_result.connect(self._twitter_poll_apply)
         self.tw_load_result.connect(self._twitter_load_apply)
 
+        self._rsi_timer = QTimer(self)
+        self._rsi_timer.timeout.connect(self._rsi_refresh)
+        self._rsi_timer.start(300_000)  # 5 dakikada bir
+        QTimer.singleShot(3000, self._rsi_refresh)  # ilk yüklemede 3sn sonra başlat
+
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -993,6 +1044,7 @@ class OverlayWindow(QWidget):
         tc = QVBoxLayout(tab_col)
         tc.setContentsMargins(0, 0, 0, 0)
         tc.setSpacing(TAB_GAP)
+
         self.tab_stock = self._make_tab("◧", 1)
         self.tab_notes = self._make_tab("✎", 2)
         self.tab_twitter = self._make_tab("𝕏", 3)
@@ -1027,6 +1079,21 @@ class OverlayWindow(QWidget):
 
         root.addWidget(self.panel)
         root.addWidget(tab_col)
+
+    def _toggle_pin(self):
+        self._pinned = not self._pinned
+        self._update_pin_style()
+
+    def _update_pin_style(self):
+        if self._pinned:
+            self.pin_btn.setStyleSheet(
+                f"background: rgba(48,209,88,40); border-radius: 8px;"
+                f" color: {C_GREEN};"
+            )
+        else:
+            self.pin_btn.setStyleSheet(
+                "background: transparent; color: rgba(235,235,245,100);"
+            )
 
     def _make_tab(self, glyph, mode):
         tab = QWidget()
@@ -1081,7 +1148,7 @@ class OverlayWindow(QWidget):
             self.tab_badge.hide()
 
     def _head_row(self, title, status_text=""):
-        """Kompakt sayfa başlığı: 12 px başlık + sağda durum, altında saç çizgisi."""
+        """Kompakt sayfa başlığı: 12 px başlık + raptiye + sağda durum, altında saç çizgisi."""
         w = QWidget()
         w.setObjectName("headrow")
         w.setStyleSheet(f"#headrow {{ border-bottom: 1px solid {C_HAIRLINE}; }}")
@@ -1091,12 +1158,23 @@ class OverlayWindow(QWidget):
         lbl = QLabel(title)
         lbl.setFont(_f(12, QFont.DemiBold))
         lbl.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+
+        self.pin_btn = QLabel("📌")
+        self.pin_btn.setFixedSize(18, 18)
+        self.pin_btn.setAlignment(Qt.AlignCenter)
+        self.pin_btn.setFont(_f(11))
+        self.pin_btn.setCursor(Qt.PointingHandCursor)
+        self.pin_btn.setToolTip("Sürekli açık tut")
+        self._update_pin_style()
+        self.pin_btn.mousePressEvent = lambda e: self._toggle_pin()
+
         status = QLabel(status_text)
         status.setFont(_f(10))
         status.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(lbl)
         h.addStretch()
+        h.addWidget(self.pin_btn)
         h.addWidget(status)
         return w, status
 
@@ -1617,6 +1695,8 @@ class OverlayWindow(QWidget):
     def _toggle(self, mode):
         closing = (self._mode == mode)
         if closing:
+            if self._pinned:
+                return
             self._mode = 0
             target_w = 0
         else:
@@ -1644,12 +1724,12 @@ class OverlayWindow(QWidget):
         self._anim.start()
 
     def changeEvent(self, event):
-        if event.type() == QEvent.WindowDeactivate and self._mode != 0:
+        if event.type() == QEvent.WindowDeactivate and self._mode != 0 and not self._pinned:
             self._toggle(self._mode)
         super().changeEvent(event)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.MouseButtonPress and self._mode != 0:
+        if event.type() == QEvent.MouseButtonPress and self._mode != 0 and not self._pinned:
             gp = event.globalPosition().toPoint()
             if not self.geometry().contains(gp):
                 self._toggle(self._mode)
@@ -1662,7 +1742,7 @@ class OverlayWindow(QWidget):
             mask = (1 << 1) | (1 << 3)  # NSLeftMouseDown | NSRightMouseDown
 
             def handler(nsevent):
-                if self._mode == 0:
+                if self._mode == 0 or self._pinned:
                     return
                 loc = _NSEvent.mouseLocation()
                 sh = _NSScreen.mainScreen().frame().size.height
@@ -1677,7 +1757,7 @@ class OverlayWindow(QWidget):
             print("global mouse monitor hatası:", e)
 
     def _check_outside_click(self):
-        if self._mode == 0 or not _APPKIT_OK:
+        if self._mode == 0 or not _APPKIT_OK or self._pinned:
             return
         try:
             buttons = _NSEvent.pressedMouseButtons()
@@ -1707,7 +1787,7 @@ class OverlayWindow(QWidget):
                 self._clear_layout(item.layout())
 
     def _rebuild_rows(self):
-        # Rebuild widget'ları yok eder; sparkline geçmişini koru
+        # Rebuild widget'ları yok eder; sparkline + RSI geçmişini koru
         for sym, row in self.rows.items():
             sp = getattr(row, "spark", None)
             if sp is not None and sp._points:
@@ -1756,6 +1836,9 @@ class OverlayWindow(QWidget):
                 hist = self._spark_history.get(sym)
                 if hist:
                     row.spark.restore(hist[0], hist[1])
+                rsi_cached = self._rsi_cache.get(sym)
+                if rsi_cached:
+                    row.update_rsi(rsi_cached)
                 row.remove_requested.connect(self._remove_stock)
                 row.levels_changed.connect(self._update_levels)
                 cv.addWidget(row)
@@ -1907,7 +1990,28 @@ class OverlayWindow(QWidget):
     def _apply_cached_prices(self):
         for sym, item in getattr(self, "_last_data", {}).items():
             if sym in self.rows:
-                self.rows[sym].update_data(item["price"], item["change_pct"])
+                self.rows[sym].update_data(
+                    item["price"], item["change_pct"],
+                    item.get("volume"), item.get("avg_volume")
+                )
+
+    def _rsi_refresh(self):
+        syms = [
+            s["symbol"] for s in self.stocks
+            if not s["symbol"].startswith(_SEP_SYMBOL)
+        ]
+        sem = threading.Semaphore(4)
+        for sym in syms:
+            def _fetch(s=sym):
+                with sem:
+                    rsi = fetch_tv_rsi(s)
+                self._signals.rsi_signal.emit(s, rsi)
+            threading.Thread(target=_fetch, daemon=True).start()
+
+    def apply_rsi(self, symbol, rsi):
+        self._rsi_cache[symbol] = rsi
+        if symbol in self.rows:
+            self.rows[symbol].update_rsi(rsi)
 
     # ── Notlar ──────────────────────────────────────────────────────────
     def _notes_load(self):

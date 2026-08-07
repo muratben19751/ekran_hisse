@@ -32,7 +32,7 @@ sys.path = [p for p in sys.path if not p.endswith(('numpy', 'numpy/core'))]
 from PySide6.QtCore import Signal, QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
-from overlay import OverlayWindow
+from overlay import OverlayWindow, _set_ns_window_level
 
 
 class _AppSignals(QObject):
@@ -49,16 +49,7 @@ except Exception:
 
 
 def _set_window_level(window):
-    try:
-        import objc
-        ns_view = objc.objc_object(c_void_p=int(window.winId()))
-        ns_win = ns_view.window()
-        ns_win.setLevel_(1001)
-        ns_win.setHidesOnDeactivate_(False)
-        if _COLLECTION_BEHAVIOR is not None:
-            ns_win.setCollectionBehavior_(_COLLECTION_BEHAVIOR)
-    except Exception as e:
-        print("window level hatası:", e)
+    _set_ns_window_level(window, level=1001, collection_behavior=_COLLECTION_BEHAVIOR)
 
 
 def main():

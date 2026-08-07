@@ -5,7 +5,6 @@ import random
 import re
 import string
 import threading
-import time
 
 import websocket
 
@@ -15,25 +14,27 @@ TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 TV_SESSION_ID = config.TV_SESSION_ID
 
 _tv_auth_token_cache = [None]
+_tv_auth_token_lock  = threading.Lock()
 
 def _get_tv_auth_token() -> str:
-    if _tv_auth_token_cache[0]:
-        return _tv_auth_token_cache[0]
-    if not TV_SESSION_ID:
-        return "unauthorized_user_token"
-    try:
-        import requests
-        s = requests.Session()
-        s.headers.update({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"})
-        s.cookies.set("sessionid", TV_SESSION_ID, domain=".tradingview.com")
-        r = s.get("https://www.tradingview.com/disclaimer/", timeout=10)
-        m = re.search(r'"auth_token":"([^"]+)"', r.text)
-        if m:
-            _tv_auth_token_cache[0] = m.group(1)
+    with _tv_auth_token_lock:
+        if _tv_auth_token_cache[0]:
             return _tv_auth_token_cache[0]
-    except Exception:
-        pass
-    return "unauthorized_user_token"
+        if not TV_SESSION_ID:
+            return "unauthorized_user_token"
+        try:
+            import requests
+            s = requests.Session()
+            s.headers.update({"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"})
+            s.cookies.set("sessionid", TV_SESSION_ID, domain=".tradingview.com")
+            r = s.get("https://www.tradingview.com/disclaimer/", timeout=10)
+            m = re.search(r'"auth_token":"([^"]+)"', r.text)
+            if m:
+                _tv_auth_token_cache[0] = m.group(1)
+                return _tv_auth_token_cache[0]
+        except Exception:
+            pass
+        return "unauthorized_user_token"
 
 # BIST dışı semboller için yfinance fallback
 _SYMBOL_MAP = {
@@ -194,59 +195,6 @@ def _calc_rsi(closes: list, period: int = 14):
     return round(100 - 100 / (1 + rs), 1)
 
 
-def _fetch_rsi_one(tv_sym: str, interval: int) -> float:
-    """Tek interval için TV'den bar çekip RSI döndürür."""
-    result = [None]
-    done = threading.Event()
-    cs = "cs_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
-    sid = "s1"
-
-    def on_open(ws):
-        token = _get_tv_auth_token()
-        ws.send(_wrap({"m": "set_auth_token", "p": [token]}))
-        ws.send(_wrap({"m": "chart_create_session", "p": [cs, ""]}))
-        ws.send(_wrap({"m": "resolve_symbol", "p": [
-            cs, "sym", f'={{"symbol":"{tv_sym}","adjustment":"splits"}}'
-        ]}))
-        ws.send(_wrap({"m": "create_series", "p": [
-            cs, sid, sid, "sym", str(_TV_INTERVALS[interval]), _RSI_PERIOD + 10
-        ]}))
-
-    def on_message(ws, message):
-        for raw in _parse_packets(message):
-            if raw.startswith("~h~"):
-                ws.send(f"~m~{len(raw)}~m~{raw}")
-                continue
-            try:
-                pkt = json.loads(raw)
-            except Exception:
-                continue
-            m = pkt.get("m")
-            p = pkt.get("p", [])
-            if m == "timescale_update" and len(p) >= 2 and sid in p[1]:
-                bars = p[1][sid].get("s", [])
-                closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
-                if closes:
-                    result[0] = _calc_rsi(closes)
-            if m == "series_completed":
-                done.set()
-            if m in ("critical_error", "series_error", "symbol_error"):
-                done.set()
-
-    ws = websocket.WebSocketApp(
-        TV_WS_URL,
-        header={"Origin": "https://www.tradingview.com"},
-        on_open=on_open,
-        on_message=on_message,
-        on_error=lambda ws, e: done.set(),
-        on_close=lambda ws, *_: done.set(),
-    )
-    threading.Thread(target=ws.run_forever, daemon=True).start()
-    done.wait(timeout=12)
-    ws.close()
-    return result[0]
-
-
 def fetch_tv_rsi(symbol: str, intervals: list = None) -> dict:
     """Tek WS bağlantısında sembolü resolve edip her interval'ı sırayla çeker."""
     if intervals is None:
@@ -271,8 +219,12 @@ def fetch_tv_rsi(symbol: str, intervals: list = None) -> dict:
             ws.send(_wrap({"m": "remove_series", "p": [cs, f"s{prev_iv}"]}))
         iv = iv_queue[current[0]]
         sid = f"s{iv}"
+        tv_iv = _TV_INTERVALS.get(iv)
+        if tv_iv is None:
+            done.set()
+            return
         ws.send(_wrap({"m": "create_series", "p": [
-            cs, sid, sid, "sym", str(_TV_INTERVALS[iv]), _RSI_PERIOD + 10
+            cs, sid, sid, "sym", tv_iv, _RSI_PERIOD + 10
         ]}))
 
     def on_open(ws):
@@ -386,14 +338,32 @@ def fetch_all(symbols: list, callback) -> None:
                                     "volume": None, "avg_volume": None}
             _maybe_done()
 
-    def _run_special(sym):
-        info = _fetch_yfinance(sym)
+    def _run_specials_bulk():
+        ticker_syms = [_SYMBOL_MAP.get(s.upper(), f"{s.upper()}.IS") for s in special_syms]
+        sym_by_ticker = {_SYMBOL_MAP.get(s.upper(), f"{s.upper()}.IS"): s for s in special_syms}
+        try:
+            import yfinance as yf
+            df = yf.download(ticker_syms, period="2d", progress=False, auto_adjust=True)
+            closes = df["Close"].iloc[-2:] if len(df) >= 2 else None
+        except Exception:
+            closes = None
         with lock:
-            results[sym] = info if info else {"symbol": sym, "price": None, "change_pct": None}
-            _maybe_done()
+            for sym in special_syms:
+                ts = _SYMBOL_MAP.get(sym.upper(), f"{sym.upper()}.IS")
+                try:
+                    if closes is not None and ts in closes.columns:
+                        prev_p = float(closes[ts].iloc[-2])
+                        price  = float(closes[ts].iloc[-1])
+                        results[sym] = {"symbol": sym, "price": price,
+                                        "change_pct": (price - prev_p) / prev_p * 100}
+                    else:
+                        results[sym] = {"symbol": sym, "price": None, "change_pct": None}
+                except Exception:
+                    results[sym] = {"symbol": sym, "price": None, "change_pct": None}
+                _maybe_done()
 
     if bist_syms:
         threading.Thread(target=_run_bist, daemon=True).start()
-    for sym in special_syms:
-        threading.Thread(target=_run_special, args=(sym,), daemon=True).start()
+    if special_syms:
+        threading.Thread(target=_run_specials_bulk, daemon=True).start()
 

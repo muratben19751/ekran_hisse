@@ -2,11 +2,17 @@
 
 notes_config.env dosyasını bir kez okur; hem notes_api_client hem overlay
 buradan okur. Böylece env parse mantığı tek yerde toplanır.
+
+Arama sırası:
+  1. ~/.ekranhisse/notes_config.env  (kullanıcı dizini — önerilen)
+  2. <proje dizini>/notes_config.env (eski konum — geriye dönük uyumluluk)
 """
 
 import os
 
-_CFG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
+_USER_CFG  = os.path.expanduser("~/.ekranhisse/notes_config.env")
+_LOCAL_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
+_CFG_FILE  = _USER_CFG if os.path.exists(_USER_CFG) else _LOCAL_CFG
 
 
 def _load():

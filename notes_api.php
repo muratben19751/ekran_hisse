@@ -1,14 +1,18 @@
 <?php
 /**
  * EkranHisse Notes API
+ * NOT: Bu dosya aktif olarak kullanılmıyor. Notlar GitHub Gist API üzerinden
+ * yönetilmektedir (notes_api_client.py). Bu dosya alternatif bir self-hosted
+ * backend olarak referans amaçlı bırakılmıştır.
+ *
  * GET  → tüm notları döndür
  * POST {"action":"save","notes":[...]} → kaydet
  *
- * Güvenlik: basit bir secret token ile korunuyor.
+ * Güvenlik: EKRANHISSE_SECRET ortam değişkeninden okunan token ile korunuyor.
  * notes_data.json dosyasını web root dışına taşıyabilirsin.
  */
 
-define('SECRET', 'ekranhisse_secret_2024');   // <-- istersen değiştir
+define('SECRET', getenv('EKRANHISSE_SECRET') ?: 'ekranhisse_secret_2024');
 define('DATA_FILE', __DIR__ . '/notes_data.json');
 
 header('Content-Type: application/json; charset=utf-8');
@@ -21,8 +25,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-// Token kontrolü (header veya query param)
-$token = $_SERVER['HTTP_X_SECRET'] ?? ($_GET['secret'] ?? '');
+// Token kontrolü — yalnızca X-Secret header'ı kabul edilir (GET query param log'lara düşer)
+$token = $_SERVER['HTTP_X_SECRET'] ?? '';
 if ($token !== SECRET) {
     http_response_code(403);
     echo json_encode(['error' => 'Forbidden']);

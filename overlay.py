@@ -7,6 +7,7 @@ Sadece bu dosya eski overlay.py'nin yerine kopyalanır.
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import urllib.request
 import urllib.parse
@@ -21,7 +22,7 @@ except Exception:
 from PySide6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint, QEvent
 )
-from PySide6.QtGui import QFont, QPainter, QColor, QDrag, QPixmap, QPen, QPainterPath
+from PySide6.QtGui import QFont, QPainter, QColor, QDrag, QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QApplication,
     QSizePolicy, QMenu, QListWidget, QTextEdit, QLineEdit, QDialog,
@@ -34,7 +35,7 @@ import config
 from logic import (
     tr_number, parse_price, parse_sep_symbol, twitter_query,
     symbol_of_tweet, compute_unread, group_stocks,
-    next_separator_counter, reorder,
+    next_separator_counter, reorder, _SEP_SYMBOL,
 )
 
 STOCKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
@@ -82,7 +83,6 @@ C_TINT_TGT  = "rgba(255, 214, 10, 20)"
 C_TINT_NEW  = "rgba(10, 132, 255, 20)"
 
 MIME_ROW = "application/x-ekranhisse-symbol"
-_SEP_SYMBOL = "---"
 
 
 # ── Yardımcılar ─────────────────────────────────────────────────────────────
@@ -128,16 +128,20 @@ def _main_screen():
     return QApplication.primaryScreen().geometry()
 
 
-def _boost_level(win, level=1002):
+def _set_ns_window_level(win, level: int = 1001, collection_behavior=None, make_key: bool = False):
+    """macOS NSWindow seviyesini ve davranışını ayarla. macOS dışında no-op."""
     try:
         import objc
         ns_view = objc.objc_object(c_void_p=int(win.winId()))
         ns_win = ns_view.window()
         ns_win.setLevel_(level)
         ns_win.setHidesOnDeactivate_(False)
-        ns_win.makeKeyAndOrderFront_(None)
-    except Exception:
-        pass
+        if collection_behavior is not None:
+            ns_win.setCollectionBehavior_(collection_behavior)
+        if make_key:
+            ns_win.makeKeyAndOrderFront_(None)
+    except Exception as e:
+        print(f"_set_ns_window_level: {e}")
 
 
 def load_stocks():
@@ -156,12 +160,30 @@ def load_stocks():
     return [s for s in data if isinstance(s, dict) and "symbol" in s]
 
 
+_save_stocks_warned = False
+
+
 def save_stocks(stocks):
+    global _save_stocks_warned
+    tmp = None
     try:
-        with open(STOCKS_FILE, "w") as f:
+        dir_ = os.path.dirname(STOCKS_FILE)
+        with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False,
+                                         suffix=".tmp", encoding="utf-8") as f:
+            tmp = f.name
             json.dump(stocks, f, ensure_ascii=False)
-    except OSError:
-        pass
+        os.replace(tmp, STOCKS_FILE)
+        _save_stocks_warned = False
+    except OSError as e:
+        if not _save_stocks_warned:
+            _save_stocks_warned = True
+            import warnings
+            warnings.warn(f"save_stocks: {STOCKS_FILE} yazılamadı: {e}", stacklevel=2)
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def load_tw_symbols():
@@ -284,7 +306,7 @@ class _SheetDialog(QDialog):
         x = sc.x() + sc.width() - TAB_W - PANEL_W - w - 8
         y = sc.y() + (sc.height() - h) // 2
         self.move(x, y)
-        QTimer.singleShot(0, lambda: _boost_level(self))
+        QTimer.singleShot(0, lambda: _set_ns_window_level(self, level=1002, make_key=True))
 
 
 class TextSheet(_SheetDialog):
@@ -317,7 +339,10 @@ class TextSheet(_SheetDialog):
         self._place(248, 128)
 
     def _ok(self):
-        self.value = self.inp.text().strip()
+        val = self.inp.text().strip()
+        if not val:
+            return
+        self.value = val
         self.accept()
 
 
@@ -432,12 +457,10 @@ class StockPickerSheet(_SheetDialog):
 
     def _filter(self, text):
         q = text.strip().upper()
+        items = [s for s in _BIST_SYMBOLS
+                 if s not in self._existing and (not q or s.startswith(q))]
         self.lst.clear()
-        for sym in _BIST_SYMBOLS:
-            if sym in self._existing:
-                continue
-            if not q or sym.startswith(q):
-                self.lst.addItem(sym)
+        self.lst.addItems(items)
         if self.lst.count() > 0:
             self.lst.setCurrentRow(0)
 
@@ -709,6 +732,14 @@ class StockRow(QWidget):
         lay.addWidget(self.lbl_price)
         lay.addWidget(self.lbl_pct)
 
+        self.lbl_rsi = QLabel("")
+        self.lbl_rsi.setFont(_f(8))
+        self.lbl_rsi.setFixedWidth(80)
+        self.lbl_rsi.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_rsi.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        self.lbl_rsi.setVisible(False)
+        lay.addWidget(self.lbl_rsi)
+
         outer.addWidget(top)
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -716,7 +747,26 @@ class StockRow(QWidget):
         self._sync_target()
 
     def update_rsi(self, rsi: dict):
-        pass
+        parts = []
+        for iv in (5, 15, 30, 60):
+            v = rsi.get(iv)
+            if v is not None:
+                parts.append(f"{iv}m:{int(round(v))}")
+        if not parts:
+            self.lbl_rsi.setVisible(False)
+            return
+        # En kısa interval rengi temsil eder
+        anchor = rsi.get(5) or rsi.get(15) or rsi.get(30) or rsi.get(60)
+        if anchor >= 70:
+            color = C_GREEN
+        elif anchor <= 30:
+            color = C_RED
+        else:
+            color = C_TEXT3
+        self.lbl_rsi.setStyleSheet(f"color: {color}; background: transparent;")
+        self.lbl_rsi.setText("  ".join(parts))
+        self.lbl_rsi.setVisible(True)
+
     # görünüm ------------------------------------------------------------
     def _paint_bg(self):
         tint = C_TINT_TGT if self._reached else "transparent"
@@ -737,7 +787,7 @@ class StockRow(QWidget):
                 f"background: {C_YELLOW if self._reached else C_GREEN}; border-radius: 2px;"
             )
             tip = f"Giriş {_tr(self._entry)}  ·  Çıkış {_tr(self._exit)}"
-            if self._price is not None and self._entry:
+            if self._price is not None and self._entry is not None and self._entry != 0:
                 pnl = (self._price - self._entry) / self._entry * 100
                 sign = "+" if pnl >= 0 else "−"
                 tip += f"  ·  {sign}{_tr(abs(pnl), 1)}%"
@@ -961,6 +1011,7 @@ class OverlayWindow(QWidget):
         self.stocks = load_stocks()
         self.rows = {}
         self.headers = {}
+        self.cards = {}   # {uid: card widget} — collapse için
         self._spark_history = {}   # {symbol: (points, up)} — rebuild'ler arası korunur
         self._rsi_cache = {}       # {symbol: {5:x,15:x,30:x,60:x}} — rebuild'ler arası korunur
         self._collapsed_sections = {}
@@ -1602,6 +1653,9 @@ class OverlayWindow(QWidget):
             self._twitter_render()
             self.lbl_twitter_status.setText("token yok")
             return
+        if getattr(self, "_tw_loading", False):
+            return
+        self._tw_loading = True
         self.lbl_twitter_status.setText("yükleniyor…")
         threading.Thread(target=self._twitter_load_worker, daemon=True).start()
 
@@ -1630,6 +1684,7 @@ class OverlayWindow(QWidget):
 
     def _twitter_load_apply(self, result):
         """Ana thread — yükleme sonucunu state'e uygula ve render et (thread-safe)."""
+        self._tw_loading = False
         from datetime import datetime
         tweets, users, err = result
         if err is not None:
@@ -1705,11 +1760,11 @@ class OverlayWindow(QWidget):
             self.stocks_page.setVisible(mode == 1)
             self.notes_page.setVisible(mode == 2)
             self.twitter_page.setVisible(mode == 3)
-            if mode == 1 and prev == 0:
+            if mode == 1 and prev != 1:
                 self._stocks_refresh()
-            if mode == 2 and prev == 0:
+            if mode == 2 and prev != 2:
                 self._notes_load()
-            if mode == 3 and prev == 0:
+            if mode == 3 and prev != 3:
                 self._twitter_load()
             if mode == 3:
                 self._tw_unread.clear()
@@ -1795,6 +1850,7 @@ class OverlayWindow(QWidget):
 
         self.rows.clear()
         self.headers.clear()
+        self.cards.clear()
         self.lbl_empty.setParent(None)
         self._clear_layout(self.rows_layout)
 
@@ -1841,12 +1897,15 @@ class OverlayWindow(QWidget):
                     row.update_rsi(rsi_cached)
                 row.remove_requested.connect(self._remove_stock)
                 row.levels_changed.connect(self._update_levels)
+                row.reorder_started.connect(self._on_reorder_started)
                 cv.addWidget(row)
                 self.rows[sym] = row
                 order.append((sym, row))
                 visible_rows += 1
 
             card.setVisible(visible_rows > 0 and not collapsed)
+            if uid is not None:
+                self.cards[uid] = card
             sv.addWidget(card)
             section.setVisible(visible_rows > 0 or (uid is not None and not self._filter))
             self.rows_layout.addWidget(section)
@@ -1876,6 +1935,8 @@ class OverlayWindow(QWidget):
     def _add_from_search(self):
         sym = self.search.text().strip().upper()
         if not sym:
+            return
+        if sym not in _BIST_SYMBOLS:
             return
         if not any(s["symbol"] == sym for s in self.stocks):
             self.stocks.append({"symbol": sym, "entry": None, "exit": None})
@@ -1954,6 +2015,10 @@ class OverlayWindow(QWidget):
 
     def _on_collapse_toggled(self, symbol, is_collapsed):
         self._collapsed_sections[symbol] = is_collapsed
+        card = self.cards.get(symbol)
+        if card is not None:
+            card.setVisible(not is_collapsed)
+            return
         self._rebuild_rows()
         self._apply_cached_prices()
 
@@ -1962,6 +2027,9 @@ class OverlayWindow(QWidget):
         save_stocks(self.stocks)
         self._rebuild_rows()
         self._apply_cached_prices()
+
+    def _on_reorder_started(self, symbol: str):
+        pass
 
     def _update_levels(self, symbol, entry, exit_price):
         for s in self.stocks:
@@ -2059,8 +2127,10 @@ class OverlayWindow(QWidget):
 
     def _notes_save_now(self):
         self.lbl_notes_status.setText("Kaydediliyor…")
-        save_notes(self._notes, lambda _: QTimer.singleShot(
-            0, lambda: self.lbl_notes_status.setText("Kaydedildi")))
+        def _on_saved(ok):
+            msg = "Kaydedildi" if ok else "Kaydetme hatası!"
+            QTimer.singleShot(0, lambda: self.lbl_notes_status.setText(msg))
+        save_notes(self._notes, _on_saved)
 
     def _add_note(self):
         dlg = TextSheet("Yeni not", "Not başlığı", parent=self)

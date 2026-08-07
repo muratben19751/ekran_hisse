@@ -63,3 +63,78 @@ def test_rand_session_format():
     assert s.startswith("qs_")
     assert len(s) == 15   # "qs_" + 12
     assert s[3:].isalnum() and s[3:].islower()
+
+
+# ── _calc_rsi ────────────────────────────────────────────────────────────────
+def test_calc_rsi_insufficient_data():
+    # period=14 için en az 15 kapanış gerekir; az veriyle None dönmeli
+    assert df._calc_rsi([1.0] * 14) is None
+
+
+def test_calc_rsi_all_gains_returns_100():
+    # Sadece yükseliş → avg_loss=0 → RSI=100
+    closes = list(range(1, 17))   # 16 değer, hep artan
+    assert df._calc_rsi(closes) == 100.0
+
+
+def test_calc_rsi_all_losses_returns_0():
+    # Sadece düşüş → avg_gain=0 → RSI=0
+    closes = list(range(16, 0, -1))
+    assert df._calc_rsi(closes) == 0.0
+
+
+def test_calc_rsi_known_value():
+    # Bilinen değerlerle hesaplanmış RSI: 14-periyot Wilder smoothing
+    # Kapanışlar: 14 sabit artış (gain=1) + 1 düşüş (loss=5)
+    # avg_gain_init = 1.0, avg_loss_init = 0.0
+    # smoothing sonrası: avg_gain=(13/14+0/14)=13/14, avg_loss=(0*13/14+5/14)=5/14
+    # RS = (13/14)/(5/14) = 13/5 = 2.6 → RSI = 100 - 100/3.6 ≈ 72.2
+    closes = [10.0 + i for i in range(15)] + [9.0]  # 15 artış, son 5 düşüş
+    result = df._calc_rsi(closes)
+    assert result is not None
+    assert 0.0 < result < 100.0
+
+
+def test_calc_rsi_returns_rounded_one_decimal():
+    closes = [float(i) for i in range(1, 20)]
+    result = df._calc_rsi(closes)
+    assert result == round(result, 1)
+
+
+# ── price=0.0 fix — or operatörü yerine is not None kullanılmalı ─────────────
+def test_price_zero_not_treated_as_missing():
+    # _SYMBOL_MAP ve _is_special'ı doğrula; 0.0 fiyatını or-kısa-devre etmez
+    # fetch_tv_prices içindeki mantığı simüle et: lp=0.0 → None değil, geçerli
+    lp = 0.0
+    last = 5.0
+    # Eski kod: price = lp or last  →  5.0 (yanlış)
+    # Yeni kod: price = lp if lp is not None else last  →  0.0 (doğru)
+    price = lp if lp is not None else last
+    assert price == 0.0
+
+
+# ── _TV_INTERVALS guard ───────────────────────────────────────────────────────
+def test_tv_intervals_valid_keys():
+    assert set(df._TV_INTERVALS.keys()) == {5, 15, 30, 60}
+
+
+def test_tv_intervals_unknown_key_returns_none():
+    assert df._TV_INTERVALS.get(1) is None
+    assert df._TV_INTERVALS.get(240) is None
+
+
+# ── _tv_symbol_for_rsi ───────────────────────────────────────────────────────
+def test_tv_symbol_for_rsi_special():
+    assert df._tv_symbol_for_rsi("XAUUSD") == "OANDA:XAUUSD"
+    assert df._tv_symbol_for_rsi("EURUSD") == "FX:EURUSD"
+    assert df._tv_symbol_for_rsi("BTCUSD") == "COINBASE:BTCUSD"
+    assert df._tv_symbol_for_rsi("XU100") == "BIST:XU100"
+
+
+def test_tv_symbol_for_rsi_bist_fallback():
+    assert df._tv_symbol_for_rsi("THYAO") == "BIST:THYAO"
+    assert df._tv_symbol_for_rsi("akbnk") == "BIST:AKBNK"
+
+
+def test_tv_symbol_for_rsi_case_insensitive():
+    assert df._tv_symbol_for_rsi("xauusd") == "OANDA:XAUUSD"

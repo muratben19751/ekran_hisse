@@ -40,7 +40,7 @@ echo "  ✓ $PY_VER  ($PY)"
 
 # ── 2. Bağımlılıklar ────────────────────────────────────────────────────
 echo ""
-echo "[ 2/4 ] Bağımlılıklar kuruluyor..."
+echo "[ 2/5 ] Bağımlılıklar kuruluyor..."
 echo "  (PySide6, yfinance, websocket-client, requests, pyobjc — ilk kurulumda birkaç dakika sürebilir)"
 echo ""
 
@@ -54,9 +54,36 @@ if [ $? -ne 0 ]; then
 fi
 echo "  ✓ Tüm bağımlılıklar kuruldu"
 
-# ── 3. Login'de otomatik başlatma ───────────────────────────────────────
+# ── 3. Yapılandırma dosyası ──────────────────────────────────────────────
 echo ""
-echo "[ 3/4 ] Login'de otomatik başlatma ayarlanıyor..."
+echo "[ 3/5 ] Yapılandırma kontrol ediliyor..."
+CFG_DIR="$HOME/.ekranhisse"
+CFG_FILE="$CFG_DIR/notes_config.env"
+LOCAL_CFG="$PROJ_DIR/notes_config.env"
+
+mkdir -p "$CFG_DIR"
+if [ ! -f "$CFG_FILE" ]; then
+    if [ -f "$LOCAL_CFG" ]; then
+        cp "$LOCAL_CFG" "$CFG_FILE"
+        echo "  ✓ notes_config.env → $CFG_FILE konumuna kopyalandı"
+    else
+        echo "  ⚠  notes_config.env bulunamadı."
+        echo "     GIST_ID, GITHUB_TOKEN vb. değerlerinizi şuraya ekleyin:"
+        echo "     $CFG_FILE"
+        cat > "$CFG_FILE" << 'ENVEOF'
+GIST_ID=
+GITHUB_TOKEN=
+TWITTER_BEARER_TOKEN=
+TV_SESSION_ID=
+ENVEOF
+    fi
+else
+    echo "  ✓ Yapılandırma zaten mevcut: $CFG_FILE"
+fi
+
+# ── 4. Login'de otomatik başlatma ───────────────────────────────────────
+echo ""
+echo "[ 4/5 ] Login'de otomatik başlatma ayarlanıyor..."
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" << EOF
@@ -83,9 +110,9 @@ launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST" 2>/dev/null || true
 echo "  ✓ Her oturum açılışında otomatik başlayacak"
 
-# ── 4. Uygulamayı başlat ────────────────────────────────────────────────
+# ── 5. Uygulamayı başlat ────────────────────────────────────────────────
 echo ""
-echo "[ 4/4 ] Uygulama başlatılıyor..."
+echo "[ 5/5 ] Uygulama başlatılıyor..."
 
 pkill -f "ekran_hisse.*main.py" 2>/dev/null || true
 sleep 1

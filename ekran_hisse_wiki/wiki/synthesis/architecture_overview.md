@@ -4,7 +4,7 @@ type: synthesis
 summary: EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü, uygulama paketi, bağımlılıklar ve env-tabanlı sır yönetimi.
 sources:
   - sources/01_proje_ozet.md
-last_updated: 2026-08-06
+last_updated: 2026-08-07
 ---
 
 # Mimari Genel Bakış
@@ -28,26 +28,34 @@ TradingView WebSocket
   └─→ fetch_tv_prices() / fetch_tv_rsi()
         └─→ _AppSignals (thread-safe)
               └─→ OverlayWindow.apply_data() / apply_rsi()
-                    └─→ StockRow.update_data()
+                    └─→ StockRow.update_data() / update_rsi()
                           └─→ Sparkline.push() → paintEvent()
+                          └─→ lbl_rsi (5m/15m/30m/60m etiketleri)
 ```
 
 ## Thread modeli
 - Ana thread: Qt event loop
-- Arka plan thread'leri: TV WebSocket (daemon), RSI fetch (Semaphore(4)), not fetch
+- Arka plan thread'leri: TV WebSocket (daemon), RSI fetch (Semaphore(4)), not fetch (serialize worker)
 - Thread → UI köprüsü: `Signal/Slot` (`_AppSignals` QObject)
-
-## Uygulama paketi senkronizasyonu
-`EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. Değişiklik sonrası manuel sync gerekir (kök → bundle). **Tek aktif kaynak proje köküdür**; eski `uygulama/` kopyası ve `overlay_*_yedek.py`/`overlay_eski.py`/`overlay 2.py` yedekleri (~7300 satır ölü kod) kaldırıldı — bundan sonra yalnızca kök + bundle senkronu takip edilir.
-
-## Bağımlılıklar
-`requirements.txt` tek kaynaktır: `PySide6`, `yfinance`, `websocket-client`, `requests`, `pyobjc-framework-Cocoa`. `websocket-client`+`requests` veri katmanının (bkz. [[data_fetcher]]), `pyobjc` ise macOS pencere davranışının zorunlu bağımlılıklarıdır. `install.sh` ve `setup.command` artık elle paket listesi yerine `pip install -r requirements.txt` çağırır.
+- **Auth token:** `_tv_auth_token_lock` ile thread-safe cache; paralel WS başlangıcında N HTTP isteği oluşması engellendi
 
 ## Güvenlik ve yapılandırma
-Tüm sırlar git-izlenmeyen `notes_config.env`'de tutulur ve `config.py` üzerinden tek noktadan okunur: `GIST_ID`, `GITHUB_TOKEN`, `TWITTER_BEARER_TOKEN`, `TV_SESSION_ID`. TradingView `sessionid` çerezi koddan çıkarılıp env'e taşındı (daha önce `data_fetcher.py`'de hardcoded'dı). `.app` bundle'ı da kendi `notes_config.env` kopyasını taşır.
+Tüm sırlar `~/.ekranhisse/notes_config.env`'de tutulur; yok ise proje dizinindeki `notes_config.env`'e fallback. `config.py` üzerinden tek noktadan okunur: `GIST_ID`, `GITHUB_TOKEN`, `TWITTER_BEARER_TOKEN`, `TV_SESSION_ID`. **Bundle'da credentials tutulmaz** — `EkranHisse.app/Contents/Resources/notes_config.env` kaldırıldı; `setup.command` kurulumda `~/.ekranhisse/` dizinine kopyalar.
+
+## Uygulama paketi senkronizasyonu
+`EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. **Tek aktif kaynak proje köküdür.**
+
+## Bağımlılıklar
+`requirements.txt` tek kaynaktır: `PySide6`, `yfinance`, `websocket-client`, `requests`, `pyobjc-framework-Cocoa`.
 
 ## Bundle launcher
 `Contents/MacOS/EkranHisse` → `arch -arm64 /usr/bin/python3 -W ignore main.py` → log: `~/Library/Logs/EkranHisse.log`
+
+## Performans notları (2026-08-07)
+- Özel semboller (XAUUSD vb.) tek `yf.download()` çağrısıyla toplu çekilir
+- `StockPickerSheet._filter()` `addItems()` batch ile tek repaint
+- Bölüm collapse/expand `card.setVisible()` ile yapılır, `_rebuild_rows()` tetiklemez
+- `notes_api_client.save_notes()` "latest wins" serialize worker — race condition yok
 
 ## İlgili
 - [[overlay_window]]
@@ -59,7 +67,6 @@ Tüm sırlar git-izlenmeyen `notes_config.env`'de tutulur ve `config.py` üzerin
 <!-- BACKLINKS:BEGIN -->
 ## Referenced by
 
-- [[data_fetcher]]
 - [[known_issues]]
 - [[overlay_window]]
 <!-- BACKLINKS:END -->

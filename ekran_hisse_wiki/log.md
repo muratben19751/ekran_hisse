@@ -31,3 +31,14 @@
 - **Düzeltme (wiki gerçeği):** [[overlay_window]] "Veri akışı" bölümü yanlış `rsi_signal → apply_rsi()` iddiasını içeriyordu; gerçeğe (ölü/bug) göre düzeltildi. [[stock_row]]'a boş `update_rsi` notu eklendi.
 - **Yeni sayfa:** [[known_issues]] (synthesis) — DeepR'ın 68 doğrulanmış bulgusundan + canlı çalıştırmadan derlenen açık bug'lar ve teknik borç; öncelik sırasıyla. [[architecture_overview]]'a çift yönlü bağlandı.
 - backlinks 6 sayfada tazelendi; index yenilendi. Lint: 0/0/0/0/0/0 (temiz).
+
+## 2026-08-11 — DeepR fix turu + yeni özellikler senkronu
+
+**Güncellenen sayfalar:** `known_issues.md`, `architecture_overview.md`, `overlay_window.md`, `data_fetcher.md`
+**Yeni kaynak:** `sources/02_deepr_review_2026-08-11.md`
+
+**Özet:**
+- 13 kritik/yüksek fix (G20–G32): falsy-zero, None→[], _fetching try/finally, DRY sabit, GIST_ID lazy, BIST doğrulama, flat RSI, NaN koruması, compute_unread active, YKBNK, datetime modül seviye, lock try/except, docstring
+- 5 yeni özellik (F1–F5): floating toggle, monitör geçişi, sürükleme, floating=açıkken kapanmama, _current_sc monitör-aware
+
+**Lint:** 0 broken_links, 0 orphans, 0 missing_summary, 0 stubs

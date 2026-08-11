@@ -77,6 +77,8 @@ def compute_unread(incoming_ids: set, seen_ids: set, active: bool):
     next_seen = seen_ids | incoming_ids
     if not seen_ids:
         return set(), next_seen          # ilk yükleme: sadece tohumla
+    if active:
+        return set(), next_seen          # sekme açık: okunmamış yok
     new_ids = incoming_ids - seen_ids
     return new_ids, next_seen
 

@@ -140,11 +140,12 @@ def fetch_tv_prices(symbols: list) -> dict:
                 sym_full = p[1].get("n", "")
                 sym = sym_full.split(":")[-1].upper()
                 v = p[1].get("v", {})
-                price = v.get("lp") or v.get("last_price")
+                lp = v.get("lp")
+                price = lp if lp is not None else v.get("last_price")
                 pchp  = v.get("chp")
                 vol   = v.get("volume")
                 avg_vol = v.get("average_volume")
-                if price and sym in needed:
+                if price is not None and sym in needed:
                     results[sym] = (price, pchp, vol, avg_vol)
                     needed.discard(sym)
                     if not needed:
@@ -189,6 +190,8 @@ def _calc_rsi(closes: list, period: int = 14):
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_gain == 0 and avg_loss == 0:
+        return None  # hareketsiz hisse: RSI tanımsız
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -340,9 +343,9 @@ def fetch_all(symbols: list, callback) -> None:
 
     def _run_specials_bulk():
         ticker_syms = [_SYMBOL_MAP.get(s.upper(), f"{s.upper()}.IS") for s in special_syms]
-        sym_by_ticker = {_SYMBOL_MAP.get(s.upper(), f"{s.upper()}.IS"): s for s in special_syms}
         try:
             import yfinance as yf
+            import math
             df = yf.download(ticker_syms, period="2d", progress=False, auto_adjust=True)
             closes = df["Close"].iloc[-2:] if len(df) >= 2 else None
         except Exception:
@@ -354,8 +357,11 @@ def fetch_all(symbols: list, callback) -> None:
                     if closes is not None and ts in closes.columns:
                         prev_p = float(closes[ts].iloc[-2])
                         price  = float(closes[ts].iloc[-1])
-                        results[sym] = {"symbol": sym, "price": price,
-                                        "change_pct": (price - prev_p) / prev_p * 100}
+                        if math.isnan(price) or math.isnan(prev_p) or prev_p == 0:
+                            results[sym] = {"symbol": sym, "price": None, "change_pct": None}
+                        else:
+                            results[sym] = {"symbol": sym, "price": price,
+                                            "change_pct": (price - prev_p) / prev_p * 100}
                     else:
                         results[sym] = {"symbol": sym, "price": None, "change_pct": None}
                 except Exception:

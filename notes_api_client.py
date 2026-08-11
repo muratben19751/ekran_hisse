@@ -6,7 +6,11 @@ import config
 
 GIST_ID      = config.GIST_ID
 GITHUB_TOKEN = config.GITHUB_TOKEN
-GIST_API     = f"https://api.github.com/gists/{GIST_ID}"
+
+def _gist_api():
+    if not GIST_ID:
+        raise ValueError("GIST_ID yapılandırılmamış — notes_config.env dosyasını kontrol edin")
+    return f"https://api.github.com/gists/{GIST_ID}"
 
 _save_lock   = threading.Lock()
 _pending     = None   # (notes, callback) | None
@@ -24,7 +28,7 @@ def _headers():
 def fetch_notes(callback):
     def _run():
         try:
-            req = urllib.request.Request(GIST_API, headers=_headers(), method="GET")
+            req = urllib.request.Request(_gist_api(), headers=_headers(), method="GET")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             content = data["files"]["notes.json"]["content"]
@@ -63,7 +67,7 @@ def _save_worker():
                     }
                 }
             }).encode("utf-8")
-            req = urllib.request.Request(GIST_API, data=payload, headers=_headers(), method="PATCH")
+            req = urllib.request.Request(_gist_api(), data=payload, headers=_headers(), method="PATCH")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resp.read()
             if callback:

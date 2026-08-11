@@ -8,7 +8,11 @@ _here = os.path.dirname(os.path.abspath(__file__))
 
 # Tek instance kilidi
 _lock_file = os.path.join(_here, ".ekranhisse.lock")
-_lock_fd = open(_lock_file, "w")
+try:
+    _lock_fd = open(_lock_file, "w")
+except OSError as e:
+    print(f"EkranHisse başlatılamadı: kilit dosyası açılamıyor ({_lock_file}): {e}")
+    sys.exit(1)
 try:
     fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except IOError:
@@ -69,7 +73,7 @@ def main():
     QTimer.singleShot(300, lambda: _set_window_level(window))
 
     keep_top = QTimer()
-    keep_top.timeout.connect(lambda: _set_window_level(window))
+    keep_top.timeout.connect(lambda: window._floating and _set_window_level(window))
     keep_top.start(15000)
     app._keep_top = keep_top
 

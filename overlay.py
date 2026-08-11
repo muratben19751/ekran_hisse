@@ -5,10 +5,7 @@ import os
 import subprocess
 import tempfile
 import threading
-import urllib.request
-import urllib.parse
-import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime
 
 try:
     from AppKit import NSEvent as _NSEvent
@@ -30,13 +27,16 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame,
 )
 
-from data_fetcher import fetch_all, fetch_tv_rsi
+from data_fetcher import fetch_all, fetch_tv_rsi_bulk
 from notes_api_client import fetch_notes, save_notes
+import twitter_client
 import config
+import symbols as sym_universe
+from applog import log
 from logic import (
     tr_number, parse_price, parse_sep_symbol, twitter_query,
     symbol_of_tweet, compute_unread, group_stocks,
-    next_separator_counter, reorder, _SEP_SYMBOL,
+    next_separator_counter, reorder, make_sep_symbol, tw_ago, _SEP_SYMBOL,
 )
 
 STOCKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
@@ -104,24 +104,7 @@ def _f(size, weight=QFont.Normal):
 _tr = tr_number
 _parse_price = parse_price
 _parse_sep_symbol = parse_sep_symbol
-
-
-def _tw_ago(iso):
-    """'2026-07-31T11:02:00.000Z' → '12dk' / '3sa' / '2g'."""
-    if not iso:
-        return ""
-    try:
-        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return iso[11:16]
-    secs = (datetime.now(timezone.utc) - t).total_seconds()
-    if secs < 60:
-        return "şimdi"
-    if secs < 3600:
-        return f"{int(secs // 60)}dk"
-    if secs < 86400:
-        return f"{int(secs // 3600)}sa"
-    return f"{int(secs // 86400)}g"
+_tw_ago = tw_ago
 
 
 def _main_screen():
@@ -141,7 +124,7 @@ def _set_ns_window_level(win, level: int = 1001, collection_behavior=None, make_
         if make_key:
             ns_win.makeKeyAndOrderFront_(None)
     except Exception as e:
-        print(f"_set_ns_window_level: {e}")
+        log.warning("_set_ns_window_level: %s", e)
 
 
 def load_stocks():
@@ -346,57 +329,8 @@ class TextSheet(_SheetDialog):
         self.accept()
 
 
-_BIST_SYMBOLS = [
-    "ACSEL","ADEL","ADESE","AEFES","AFYON","AGESA","AGHOL","AGYO","AHGAZ","AHSGY",
-    "AKBNK","AKCNS","AKFGY","AKGRT","AKINM","AKSA","AKSEL","AKSEN","AKSGY","AKSUE",
-    "AKTIF","ALARK","ALBRK","ALFAS","ALGYO","ALKA","ALKIM","ALKLC","ALMAD","ALTNY",
-    "ANELE","ANGEN","ANHYT","ANSGR","ARASE","ARCLK","ARDYZ","ARENA","ARSAN","ARTMS",
-    "ARZUM","ASELS","ASGYO","ASTOR","ASUZU","ATAGY","ATAKP","ATATP","ATEKS","ATLAS",
-    "ATSYH","AVHOL","AVOD","AYCES","AYEN","AYES","AZTEK","BAGFS","BAKAB","BALAT",
-    "BANVT","BARMA","BASCM","BASGZ","BAYRK","BERA","BEYAZ","BFREN","BIMAS","BIOEN",
-    "BIZIM","BJKAS","BLCYT","BNTAS","BOSSA","BRISA","BRKO","BRKVY","BRMEN","BRSAN",
-    "BRYAT","BSOKE","BTCIM","BUCIM","BURCE","BURVA","BVSAN","CANTE","CASA","CCOLA",
-    "CELHA","CEMAS","CEMTS","CENTA","CIMSA","CLEBI","CMENT","CONSE","COSMO","CRFSA",
-    "CUSAN","CVKMD","CWENE","DAGHL","DAPGM","DARDL","DENGE","DERHL","DERIM","DESA",
-    "DESPC","DEVA","DGATE","DGGYO","DGNMO","DITAS","DJIST","DMSAS","DNISI","DOAS",
-    "DOBUR","DOCO","DOGUB","DOHOL","DOMCO","DOPA","DPAZR","DRDOC","DTRND","DURDO",
-    "DYOBY","DZGYO","EBEBK","EDATA","EDIP","EGEEN","EGEPO","EGGUB","EGPRO","EGSER",
-    "EKGYO","ELITE","EMKEL","EMNIS","ENDKS","ENERY","ENGYO","ENJSA","ENKAI","ENSRI",
-    "EPLAS","ERBOS","ERCB","ERDEM","ERDGD","EREGL","ERSU","ESCAR","ESCOM","ESEN",
-    "ETILR","ETYAT","EUHOL","EUPWR","EUREN","EUYO","EYGYO","FADE","FENER","FMIZP",
-    "FONET","FORMT","FORTE","FROTO","FZLGY","GARAN","GARFA","GEDIK","GEDZA","GENIL",
-    "GENTS","GEREL","GESAN","GLBMD","GLCVY","GLRYH","GLYHO","GMTAS","GOKNR","GOLTS",
-    "GOODY","GOZDE","GRSEL","GRTHO","GSDDE","GSDHO","GSRAY","GUBRF","GWIND","GZNMI",
-    "HALKB","HATEK","HDFGS","HEDEF","HEKTS","HLGYO","HTTBT","HUNER","HURGZ","ICBCT",
-    "ICUGS","IDEAS","IDGYO","IEYHO","IHEVA","IHGZT","IHLAS","IHLGM","IHYAY","IMASM",
-    "INDES","INFO","INTEM","INVEO","INVES","IPEKE","ISBIR","ISCTR","ISDMR","ISFIN",
-    "ISGSY","ISGYO","ISYAT","ITTFH","IZENR","IZFAS","IZINV","IZMDC","JANTS","KARMA",
-    "KARTN","KATMR","KAYSE","KBORU","KCAER","KCHOL","KENT","KERVN","KFEIN","KGYO",
-    "KLGYO","KLKIM","KLMSN","KLNMA","KLRHO","KLSER","KMPUR","KNFRT","KORDS","KOTON",
-    "KOZAA","KOZAL","KRDMA","KRDMB","KRDMD","KRGYO","KRONT","KRPLS","KRSTL","KRTEK",
-    "KRVGD","KSTUR","KTLEV","KTSKR","KUTPO","KUYAS","KVGYO","KZBGY","LIDER","LIDFA",
-    "LINK","LMKDC","LOGO","LRSHO","LUKSK","MAALT","MAGEN","MAKIM","MAKTK","MANAS",
-    "MARBL","MARKA","MARTI","MAVI","MEDTR","MEGAP","MEGMT","MEKAG","MEPET","MERCN",
-    "MERIT","MERKO","METRO","METUR","MGROS","MHRGY","MIPAZ","MMCAS","MNDRS","MNDTR",
-    "MOBTL","MOGAN","MSGYO","MTRKS","MTRYO","MZHLD","NATEN","NETAS","NIBAS","NTGAZ",
-    "NTHOL","NUGYO","NUHCM","OBAMS","OBASE","ODAS","ODINE","OFSYM","OKCYM","ONCSM",
-    "ONUR","ORGE","ORMA","OSMEN","OSTIM","OTKAR","OYAKC","OYAYO","OYLUM","OZGYO",
-    "OZKGY","OZRDN","OZSUB","PAGYO","PAMEL","PAPIL","PCILT","PDPAS","PEGYO","PEKGY",
-    "PENGD","PENTA","PETKM","PETUN","PGSUS","PINSU","PKART","PNLSN","POLHO","POLTK",
-    "PRKAB","PRKME","PRZMA","PSDTC","PSGYO","PTOFS","PTHOL","RAKSN","RALYH","RAYSG",
-    "RHEAG","RNPOL","RODRG","RTALB","RUBNS","RYGYO","RYSAS","SAFKR","SAGYO","SAHOL",
-    "SANEL","SANFM","SANKO","SARKY","SASA","SAYAS","SDTTR","SEGMN","SEGYO","SEKFK",
-    "SEKUR","SELEC","SELGD","SELVA","SEYKM","SILVR","SISE","SKBNK","SKTAS","SKYMD",
-    "SMRTG","SNGYO","SNKRN","SODSN","SOKM","SONME","SRVGY","SUMAS","SUNEKS","SUWEN",
-    "TABGD","TATEN","TATGD","TAVHL","TBORG","TCELL","TDGYO","TEKTU","TERA","TEZOL",
-    "TGSAS","THYAO","TIRE","TKNSA","TKURU","TMSN","TOASO","TRCAS","TRGYO","TRILC",
-    "TSPOR","TTKOM","TTRAK","TUCLK","TURGZ","TURSG","TZNGY","ULUFA","ULUSE","ULUUN",
-    "UMPAS","UNLU","UNYEC","USAK","UZERB","VAKBN","VAKFN","VAKKO","VBTYZ","VERTU",
-    "VERUS","VESBE","VESTL","VKGYO","VKFYO","VRGYO","WNDYR","XTCRT","XU030","XU050",
-    "XU100","XBANK","XBLSM","XGIDA","XHOLD","XKMYA","XKURY","XMANA","XMESY","XSGRT",
-    "XSPOR","XTEKS","XTRZM","XTUFE","XUMAL","XUSIN","XUTEK","XUHIZ","XAUUSD",
-    "YATAS","YBTAS","YKBNK","YKSLN","YUNSA","YYLGD","ZEDUR","ZOREN","ZORLU",
-]
+# Sembol evreni tek kaynaktan (symbols.json) gelir.
+_BIST_SYMBOLS = sym_universe.KNOWN
 
 
 class StockPickerSheet(_SheetDialog):
@@ -468,7 +402,7 @@ class StockPickerSheet(_SheetDialog):
         selected = self.lst.currentItem()
         typed = self.inp.text().strip().upper()
         candidate = selected.text() if selected else typed
-        if candidate and candidate in _BIST_SYMBOLS:
+        if candidate and sym_universe.is_known(candidate):
             self.value = candidate
             self.accept()
 
@@ -1644,6 +1578,7 @@ class OverlayWindow(QWidget):
         top.setSpacing(6)
         uname = user.get("username") or user.get("name") or "—"
         lbl_user = QLabel("@" + uname)
+        lbl_user.setTextFormat(Qt.PlainText)
         lbl_user.setFont(_f(11, QFont.DemiBold))
         lbl_user.setStyleSheet(
             f"color: {C_TEXT if unread else C_TEXT2}; background: transparent;"
@@ -1667,6 +1602,7 @@ class OverlayWindow(QWidget):
 
         text = " ".join(tw.get("text", "").split())
         lbl_text = QLabel(text)
+        lbl_text.setTextFormat(Qt.PlainText)
         lbl_text.setFont(_f(11))
         lbl_text.setWordWrap(True)
         lbl_text.setStyleSheet(
@@ -1746,30 +1682,11 @@ class OverlayWindow(QWidget):
             return
         self._tw_loading = True
         self.lbl_twitter_status.setText("yükleniyor…")
-        threading.Thread(target=self._twitter_load_worker, daemon=True).start()
-
-    def _twitter_load_worker(self):
-        """Arka plan thread — ağdan tweet çeker, sonucu sinyalle ana thread'e iletir."""
-        token = self._twitter_token()
-        if not token:
-            return
-        try:
-            url = (
-                "https://api.twitter.com/2/tweets/search/recent"
-                f"?query={urllib.parse.quote(self._twitter_query())}&max_results=20"
-                "&tweet.fields=created_at,author_id,text"
-                "&expansions=author_id&user.fields=username,name"
-            )
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            tweets = data.get("data", [])
-            users = {u["id"]: u for u in data.get("includes", {}).get("users", [])}
-            self.tw_load_result.emit((tweets, users, None))
-        except urllib.error.HTTPError as e:
-            self.tw_load_result.emit(([], {}, f"hata {e.code}"))
-        except Exception:
-            self.tw_load_result.emit(([], {}, "hata"))
+        # twitter_client kendi thread'inde çalışır; sonucu sinyalle ana thread'e geçir.
+        twitter_client.fetch_recent(
+            self._twitter_query(),
+            lambda result: self.tw_load_result.emit(result),
+        )
 
     def _twitter_load_apply(self, result):
         """Ana thread — yükleme sonucunu state'e uygula ve render et (thread-safe)."""
@@ -1786,6 +1703,7 @@ class OverlayWindow(QWidget):
         had_seen = bool(self._tw_seen)
         new_ids, self._tw_seen = compute_unread(
             incoming, self._tw_seen, active=(self._mode == 3))
+        self._prune_tw_seen(incoming)
         if had_seen:
             self._tw_hl = new_ids
             if self._mode != 3:
@@ -1797,33 +1715,36 @@ class OverlayWindow(QWidget):
         self._twitter_render()
         self._update_tab_badge()
 
-    def _twitter_poll(self):
-        threading.Thread(target=self._twitter_poll_worker, daemon=True).start()
+    def _prune_tw_seen(self, incoming):
+        """_tw_seen sınırsız büyümesin: son görülenler + gelenlerle sınırla.
 
-    def _twitter_poll_worker(self):
-        """Arka plan thread — SADECE ağdan id çeker, state'e dokunmaz."""
+        Twitter search yalnızca son ~20 tweet'i döndürür; eski id'leri tutmanın
+        faydası yok. Üst sınırı aşınca gelenleri koruyup gerisini buda.
+        """
+        _CAP = 500
+        if len(self._tw_seen) > _CAP:
+            # gelenleri kesin koru, kalanı sınıra kadar doldur
+            keep = set(incoming)
+            for tid in self._tw_seen:
+                if len(keep) >= _CAP:
+                    break
+                keep.add(tid)
+            self._tw_seen = keep
+
+    def _twitter_poll(self):
         token = self._twitter_token()
         if not token:
             return
-        try:
-            url = (
-                "https://api.twitter.com/2/tweets/search/recent"
-                f"?query={urllib.parse.quote(self._twitter_query())}&max_results=20"
-                "&tweet.fields=id"
-            )
-            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            incoming = {tw.get("id", "") for tw in data.get("data", [])}
-            # State değişikliği ana thread'de yapılsın diye sinyalle ilet.
-            self.tw_poll_result.emit(incoming)
-        except Exception:
-            pass
+        twitter_client.fetch_ids(
+            self._twitter_query(),
+            lambda result: self.tw_poll_result.emit(result[0]) if result[1] is None else None,
+        )
 
     def _twitter_poll_apply(self, incoming):
         """Ana thread — poll sonucunu state'e uygula (thread-safe)."""
         new_ids, self._tw_seen = compute_unread(
             incoming, self._tw_seen, active=(self._mode == 3))
+        self._prune_tw_seen(incoming)
         if new_ids and self._mode != 3:
             self._tw_unread |= new_ids
             self._tw_hl |= new_ids
@@ -1850,6 +1771,7 @@ class OverlayWindow(QWidget):
             self.twitter_page.setVisible(mode == 3)
             if mode == 1 and prev != 1:
                 self._stocks_refresh()
+                QTimer.singleShot(1500, self._rsi_refresh)
             if mode == 2 and prev != 2:
                 self._notes_load()
             if mode == 3 and prev != 3:
@@ -1897,7 +1819,7 @@ class OverlayWindow(QWidget):
             if self._ns_monitor is not None and hasattr(self, "_outside_click_timer"):
                 self._outside_click_timer.stop()
         except Exception as e:
-            print("global mouse monitor hatası:", e)
+            log.warning("global mouse monitor hatası: %s", e)
 
     def _check_outside_click(self):
         if self._mode == 0 or not _APPKIT_OK or self._pinned or self._floating:
@@ -2012,7 +1934,10 @@ class OverlayWindow(QWidget):
         q = text.strip().upper()
         self._filter = q
         known = any(s["symbol"].upper() == q for s in self.stocks)
-        self.btn_add_inline.setVisible(len(q) >= 3 and not known)
+        # Buton yalnızca bilinen ama henüz eklenmemiş sembolde görünsün.
+        self.btn_add_inline.setVisible(
+            len(q) >= 3 and not known and sym_universe.is_known(q)
+        )
         # Gecikmeli: liste yeniden kurma (200ms yazma durunca)
         self._search_timer.start(200)
 
@@ -2024,7 +1949,9 @@ class OverlayWindow(QWidget):
         sym = self.search.text().strip().upper()
         if not sym:
             return
-        if sym not in _BIST_SYMBOLS:
+        if not sym_universe.is_known(sym):
+            # Sessizce yutma — kullanıcıya bilinmeyen sembolü bildir.
+            self.lbl_stock_status.setText(f"Bilinmeyen sembol: {sym}")
             return
         if not any(s["symbol"] == sym for s in self.stocks):
             self.stocks.append({"symbol": sym, "entry": None, "exit": None})
@@ -2068,7 +1995,7 @@ class OverlayWindow(QWidget):
         if dlg.value is None:
             return
         counter = next_separator_counter(self.stocks)
-        self.stocks.append({"symbol": f"{_SEP_SYMBOL}:{dlg.value}:{counter}", "entry": None, "exit": None})
+        self.stocks.append({"symbol": make_sep_symbol(dlg.value, counter), "entry": None, "exit": None})
         save_stocks(self.stocks)
         self._rebuild_rows()
 
@@ -2078,7 +2005,7 @@ class OverlayWindow(QWidget):
         dlg.exec()
         if dlg.value is None:
             return
-        new_symbol = f"{_SEP_SYMBOL}:{dlg.value}:{counter}"
+        new_symbol = make_sep_symbol(dlg.value, counter)
         for s in self.stocks:
             if s["symbol"] == symbol:
                 s["symbol"] = new_symbol
@@ -2112,6 +2039,11 @@ class OverlayWindow(QWidget):
 
     def _remove_stock(self, symbol):
         self.stocks = [s for s in self.stocks if s["symbol"] != symbol]
+        # Kaldırılan sembolün önbelleklerini de temizle (sınırsız birikmesin).
+        self._rsi_cache.pop(symbol, None)
+        self._spark_history.pop(symbol, None)
+        if symbol in self._collapsed_sections:
+            self._collapsed_sections.pop(symbol, None)
         save_stocks(self.stocks)
         self._rebuild_rows()
         self._apply_cached_prices()
@@ -2153,17 +2085,34 @@ class OverlayWindow(QWidget):
                 )
 
     def _rsi_refresh(self):
+        # Yalnızca hisse paneli açıkken RSI çek — kapalıyken boşuna WS açma.
+        if self._mode != 1:
+            return
         syms = [
             s["symbol"] for s in self.stocks
             if not s["symbol"].startswith(_SEP_SYMBOL)
         ]
-        sem = threading.Semaphore(4)
-        for sym in syms:
-            def _fetch(s=sym):
-                with sem:
-                    rsi = fetch_tv_rsi(s)
-                self._signals.rsi_signal.emit(s, rsi)
-            threading.Thread(target=_fetch, daemon=True).start()
+        if not syms:
+            return
+        if getattr(self, "_rsi_fetching", False):
+            return
+        self._rsi_fetching = True
+
+        def _fetch():
+            try:
+                # Tek WS bağlantısında tüm semboller için RSI (sembol başına
+                # ayrı bağlantı yok).
+                out = fetch_tv_rsi_bulk(syms)
+            except Exception as e:
+                log.warning("RSI toplu çekim hatası: %s", e)
+                out = {}
+            finally:
+                self._rsi_fetching = False
+            for s in syms:
+                rsi = out.get(s.upper())
+                if rsi:
+                    self._signals.rsi_signal.emit(s, rsi)
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def apply_rsi(self, symbol, rsi):
         self._rsi_cache[symbol] = rsi
@@ -2172,10 +2121,19 @@ class OverlayWindow(QWidget):
 
     # ── Notlar ──────────────────────────────────────────────────────────
     def _notes_load(self):
+        if getattr(self, "_notes_loading", False):
+            return
+        self._notes_loading = True
         self.lbl_notes_status.setText("Yükleniyor…")
         fetch_notes(lambda notes: self._signals.notes_signal.emit(notes))
 
     def apply_notes(self, notes):
+        self._notes_loading = False
+        if notes == "unconfigured":
+            self._notes = []
+            self._refresh_notes_list()
+            self.lbl_notes_status.setText("Kurulmadı (GIST_ID/token yok)")
+            return
         if notes is None:
             self.lbl_notes_status.setText("Bağlantı hatası")
             return
@@ -2189,6 +2147,15 @@ class OverlayWindow(QWidget):
         for n in self._notes:
             self.notes_list.addItem(n.get("title", "—"))
         self.notes_list.blockSignals(False)
+        # Boş durum: liste boşsa editörü kapat, ipucu göster.
+        if not self._notes:
+            self._current_note = None
+            self.notes_editor.setEnabled(False)
+            self.notes_editor.blockSignals(True)
+            self.notes_editor.clear()
+            self.notes_editor.setPlaceholderText("Not yok — '+ Not' ile ekleyin.")
+            self.notes_editor.blockSignals(False)
+            return
         if self._current_note is not None and self._current_note < len(self._notes):
             self.notes_list.setCurrentRow(self._current_note)
         else:

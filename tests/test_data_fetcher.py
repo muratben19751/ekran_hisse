@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 df = pytest.importorskip("data_fetcher")   # websocket bağımlılığı yoksa atla
+import symbols as sym_universe
 
 
 # ── _parse_packets ───────────────────────────────────────────────────────────
@@ -40,13 +41,13 @@ def test_wrap_length_matches():
     assert int(prefix) == len(body)
 
 
-# ── _tv_symbol ───────────────────────────────────────────────────────────────
+# ── tv_symbol (symbols modülü) ────────────────────────────────────────────────
 def test_tv_symbol():
-    assert df._tv_symbol("thyao") == "BIST:THYAO"
-    assert df._tv_symbol("AKBNK") == "BIST:AKBNK"
+    assert sym_universe.tv_symbol("thyao") == "BIST:THYAO"
+    assert sym_universe.tv_symbol("AKBNK") == "BIST:AKBNK"
 
 
-# ── _is_special ──────────────────────────────────────────────────────────────
+# ── is_special (symbols modülü) ───────────────────────────────────────────────
 @pytest.mark.parametrize("sym,expected", [
     ("XAUUSD", True),
     ("xauusd", True),
@@ -54,12 +55,12 @@ def test_tv_symbol():
     ("XU100", True),
 ])
 def test_is_special(sym, expected):
-    assert df._is_special(sym) is expected
+    assert sym_universe.is_special(sym) is expected
 
 
-# ── _rand_session ────────────────────────────────────────────────────────────
-def test_rand_session_format():
-    s = df._rand_session()
+# ── _rand_id ──────────────────────────────────────────────────────────────────
+def test_rand_id_format():
+    s = df._rand_id("qs_")
     assert s.startswith("qs_")
     assert len(s) == 15   # "qs_" + 12
     assert s[3:].isalnum() and s[3:].islower()
@@ -103,7 +104,6 @@ def test_calc_rsi_returns_rounded_one_decimal():
 
 # ── price=0.0 fix — or operatörü yerine is not None kullanılmalı ─────────────
 def test_price_zero_not_treated_as_missing():
-    # _SYMBOL_MAP ve _is_special'ı doğrula; 0.0 fiyatını or-kısa-devre etmez
     # fetch_tv_prices içindeki mantığı simüle et: lp=0.0 → None değil, geçerli
     lp = 0.0
     last = 5.0
@@ -123,18 +123,18 @@ def test_tv_intervals_unknown_key_returns_none():
     assert df._TV_INTERVALS.get(240) is None
 
 
-# ── _tv_symbol_for_rsi ───────────────────────────────────────────────────────
-def test_tv_symbol_for_rsi_special():
-    assert df._tv_symbol_for_rsi("XAUUSD") == "OANDA:XAUUSD"
-    assert df._tv_symbol_for_rsi("EURUSD") == "FX:EURUSD"
-    assert df._tv_symbol_for_rsi("BTCUSD") == "COINBASE:BTCUSD"
-    assert df._tv_symbol_for_rsi("XU100") == "BIST:XU100"
+# ── RSI sembol adresleri (symbols modülü) ─────────────────────────────────────
+def test_tv_symbol_rsi_special():
+    assert sym_universe.tv_symbol("XAUUSD") == "OANDA:XAUUSD"
+    assert sym_universe.tv_symbol("EURUSD") == "FX:EURUSD"
+    assert sym_universe.tv_symbol("BTCUSD") == "COINBASE:BTCUSD"
+    assert sym_universe.tv_symbol("XU100") == "BIST:XU100"
 
 
-def test_tv_symbol_for_rsi_bist_fallback():
-    assert df._tv_symbol_for_rsi("THYAO") == "BIST:THYAO"
-    assert df._tv_symbol_for_rsi("akbnk") == "BIST:AKBNK"
+def test_tv_symbol_rsi_bist_fallback():
+    assert sym_universe.tv_symbol("THYAO") == "BIST:THYAO"
+    assert sym_universe.tv_symbol("akbnk") == "BIST:AKBNK"
 
 
-def test_tv_symbol_for_rsi_case_insensitive():
-    assert df._tv_symbol_for_rsi("xauusd") == "OANDA:XAUUSD"
+def test_tv_symbol_rsi_case_insensitive():
+    assert sym_universe.tv_symbol("xauusd") == "OANDA:XAUUSD"

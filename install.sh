@@ -10,6 +10,18 @@ PLIST="$LAUNCH_AGENTS/com.local.ekranhisse.plist"
 echo "=== EkranHisse Kurulum ==="
 echo "Proje dizini: $PROJ_DIR"
 
+# ── Build: kaynak dosyaları .app bundle'ına kopyala ──────────────────────────
+# Bundle'daki .py kopyaları build çıktısıdır (git'te tutulmaz). Kaynak tek
+# yerde (proje kökü); kurulumda bundle'a senkronlanır ki iki kopya asla
+# birbirinden ayrışmasın.
+echo "Uygulama dosyaları bundle'a kopyalanıyor..."
+RES_DIR="$APP_PATH/Contents/Resources"
+mkdir -p "$RES_DIR"
+for f in main.py overlay.py logic.py data_fetcher.py config.py \
+         notes_api_client.py twitter_client.py applog.py symbols.py symbols.json; do
+    cp "$PROJ_DIR/$f" "$RES_DIR/$f"
+done
+
 # Bağımlılıkları kur — launcher /usr/bin/python3 kullandığı için AYNI yorumlayıcıya kur
 echo "Bağımlılıklar kuruluyor..."
 PY="/usr/bin/python3"; [ -x "$PY" ] || PY="$(command -v python3)"

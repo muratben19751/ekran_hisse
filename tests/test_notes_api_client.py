@@ -4,7 +4,6 @@ import json
 import os
 import sys
 import threading
-from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,6 +11,13 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import notes_api_client as nac
+
+
+@pytest.fixture(autouse=True)
+def _configured(monkeypatch):
+    """Tüm testlerde GIST_ID/GITHUB_TOKEN dolu varsay (NotConfigured atlanır)."""
+    monkeypatch.setattr(nac, "GIST_ID", "fake_gist")
+    monkeypatch.setattr(nac, "GITHUB_TOKEN", "fake_token")
 
 
 def _fake_response(data: dict):
@@ -78,7 +84,28 @@ def test_fetch_notes_returns_none_on_missing_key():
     assert received == [None]
 
 
-# ── save_notes ───────────────────────────────────────────────────────────────
+# ── NotConfigured — kurulum eksikken ───────────────────────────────────────────
+def test_is_configured():
+    # fixture GIST_ID/GITHUB_TOKEN dolu yaptı
+    assert nac.is_configured() is True
+
+
+def test_fetch_notes_unconfigured(monkeypatch):
+    """GIST_ID boşsa fetch_notes callback('unconfigured') çağırır, ağ isteği yok."""
+    monkeypatch.setattr(nac, "GIST_ID", "")
+    received = []
+    done = threading.Event()
+
+    def cb(notes):
+        received.append(notes)
+        done.set()
+
+    # urlopen çağrılmamalı; çağrılırsa test patlar
+    with patch("urllib.request.urlopen", side_effect=AssertionError("ağ isteği olmamalı")):
+        nac.fetch_notes(cb)
+        done.wait(timeout=3)
+
+    assert received == ["unconfigured"]
 def test_save_notes_calls_callback_true_on_success():
     received = []
     done = threading.Event()

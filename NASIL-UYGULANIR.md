@@ -16,8 +16,8 @@ mevcut listen olduğu gibi açılır.
 ## Ne değişti
 
 **Geometri**
-- Panel 285 → **320px**, köşe yarıçapı 8 → 12, sekmeler 44 → 56px yükseklik, sekme arası 6px.
-- Animasyon 200 → 220ms (OutCubic aynı).
+- Panel **300px**, köşe yarıçapı 12, sekmeler 52px yükseklik, sekme arası 6px.
+- Panel aç/kapa animasyonu 120ms (OutQuart).
 
 **Görünüm**
 - Panel arkaplanı `rgba(30,30,32,236)`, kenarlık `rgba(255,255,255,30)`.
@@ -30,7 +30,7 @@ mevcut listen olduğu gibi açılır.
 - Yeşil ayırıcı bar yerine **büyük harf bölüm başlığı** + chevron + adet sayacı (tıkla → katla).
 - Giriş/çıkış barı: 4px yuvarlak track + yeşil dolgu; hedef aşılınca sarı `#ffd60a` +
   satırda **"Hedef"** rozeti.
-- Sekmeler: aktif olan mavi `#0a84ff`, ikonlar ◧ (portföy) ve ✎ (notlar).
+- Sekmeler: aktif olan mavi `#0a84ff`, ikonlar ◧ (portföy), ✎ (notlar) ve 𝕏 (tweet akışı).
 
 **Etkileşim**
 - **Arama alanı** (panel başında): yazarken liste filtrelenir; 3+ harfte mavi "Ekle"

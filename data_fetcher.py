@@ -1,6 +1,13 @@
-"""TradingView WebSocket üzerinden gerçek zamanlı fiyat çeker."""
+"""TradingView WebSocket üzerinden gerçek zamanlı fiyat + RSI çeker.
+
+Sembol → servis eşlemeleri `symbols` modülünden (symbols.json) gelir; burada
+tekrar tutulmaz. Fiyatlar TV WS ile toplu çekilir; özel semboller (FX/altın/
+endeks/kripto) yfinance ile. RSI tek bir WS bağlantısında tüm semboller için
+toplu resolve + create_series ile alınır (sembol başına ayrı bağlantı yok).
+"""
 
 import json
+import math
 import random
 import re
 import string
@@ -9,6 +16,8 @@ import threading
 import websocket
 
 import config
+import symbols as sym_universe
+from applog import log
 
 TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 TV_SESSION_ID = config.TV_SESSION_ID
@@ -32,63 +41,13 @@ def _get_tv_auth_token() -> str:
             if m:
                 _tv_auth_token_cache[0] = m.group(1)
                 return _tv_auth_token_cache[0]
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("TV auth token alınamadı: %s", e)
         return "unauthorized_user_token"
 
-# BIST dışı semboller için yfinance fallback
-_SYMBOL_MAP = {
-    "XAUUSD": "GC=F",
-    "XAGUSD": "SI=F",
-    "XTIUSD": "CL=F",
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "USDTRY": "TRY=X",
-    "BTCUSD": "BTC-USD",
-    "ETHUSD": "ETH-USD",
-    "DXY":    "DX-Y.NYB",
-    "SP500":  "^GSPC",
-    "NASDAQ": "^IXIC",
-    "DOW":    "^DJI",
-    "XU100":  "XU100.IS",
-    "XU030":  "XU030.IS",
-    "XBANK":  "XBANK.IS",
-    "XUSIN":  "XUSIN.IS",
-    "XHOLD":  "XHOLD.IS",
-    "XTCRT":  "XTCRT.IS",
-}
 
-# RSI için TV'deki doğru sembol adresleri
-_TV_RSI_SYMBOL_MAP = {
-    "XAUUSD": "OANDA:XAUUSD",
-    "XAGUSD": "OANDA:XAGUSD",
-    "XTIUSD": "OANDA:XTIUSD",
-    "EURUSD": "FX:EURUSD",
-    "GBPUSD": "FX:GBPUSD",
-    "USDJPY": "FX:USDJPY",
-    "USDTRY": "FX:USDTRY",
-    "BTCUSD": "COINBASE:BTCUSD",
-    "ETHUSD": "COINBASE:ETHUSD",
-    "DXY":    "TVC:DXY",
-    "SP500":  "SP:SPX",
-    "NASDAQ": "NASDAQ:NDX",
-    "DOW":    "DJ:DJI",
-    "XU100":  "BIST:XU100",
-    "XU030":  "BIST:XU030",
-    "XBANK":  "BIST:XBANK",
-    "XUSIN":  "BIST:XUSIN",
-    "XHOLD":  "BIST:XHOLD",
-    "XTCRT":  "BIST:XTCRT",
-}
-
-
-def _is_special(symbol: str) -> bool:
-    return symbol.upper() in _SYMBOL_MAP
-
-
-def _rand_session():
-    return "qs_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+def _rand_id(prefix: str) -> str:
+    return prefix + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
 
 
 def _wrap(msg: dict) -> str:
@@ -100,20 +59,12 @@ def _parse_packets(data: str) -> list:
     return re.findall(r"~m~\d+~m~(.+?)(?=~m~\d+~m~|$)", data)
 
 
-def _tv_symbol(symbol: str) -> str:
-    return f"BIST:{symbol.upper()}"
-
-
-def _tv_symbol_for_rsi(symbol: str) -> str:
-    return _TV_RSI_SYMBOL_MAP.get(symbol.upper(), f"BIST:{symbol.upper()}")
-
-
 def fetch_tv_prices(symbols: list) -> dict:
-    """TV WebSocket'e bağlan, fiyatları al, kapat. {symbol: (price, change_pct)}"""
+    """TV WebSocket'e bağlan, fiyatları al, kapat. {symbol: (price, chp, vol, avg_vol)}"""
     results = {}
     done_event = threading.Event()
     needed = set(s.upper() for s in symbols)
-    quote_session = _rand_session()
+    quote_session = _rand_id("qs_")
 
     def on_open(ws):
         token = _get_tv_auth_token()
@@ -121,8 +72,8 @@ def fetch_tv_prices(symbols: list) -> dict:
         ws.send(_wrap({"m": "quote_create_session", "p": [quote_session]}))
         ws.send(_wrap({"m": "quote_set_fields",
                         "p": [quote_session, "lp", "chp", "ch", "volume", "average_volume"]}))
-        for sym in symbols:
-            ws.send(_wrap({"m": "quote_add_symbols", "p": [quote_session, _tv_symbol(sym)]}))
+        for s in symbols:
+            ws.send(_wrap({"m": "quote_add_symbols", "p": [quote_session, sym_universe.tv_symbol(s)]}))
 
     def on_message(ws, message):
         for raw in _parse_packets(message):
@@ -152,6 +103,7 @@ def fetch_tv_prices(symbols: list) -> dict:
                         done_event.set()
 
     def on_error(ws, err):
+        log.warning("TV fiyat WS hatası: %s", err)
         done_event.set()
 
     def on_close(ws, *_):
@@ -199,45 +151,64 @@ def _calc_rsi(closes: list, period: int = 14):
 
 
 def fetch_tv_rsi(symbol: str, intervals: list = None) -> dict:
-    """Tek WS bağlantısında sembolü resolve edip her interval'ı sırayla çeker."""
+    """Tek sembol için RSI. (Geriye dönük uyumluluk — içeride bulk çağırır.)"""
     if intervals is None:
         intervals = [5, 15, 30, 60]
-    tv_sym = _tv_symbol_for_rsi(symbol)
-    results = {iv: None for iv in intervals}
-    cs = "cs_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+    out = fetch_tv_rsi_bulk([symbol], intervals)
+    return out.get(symbol.upper(), {iv: None for iv in intervals})
 
-    # Her interval sırayla işlenecek; WS açık kalır
-    iv_queue = list(intervals)
-    current = [0]   # şu an işlenen index
+
+def fetch_tv_rsi_bulk(symbols: list, intervals: list = None) -> dict:
+    """Tüm semboller için RSI'yı TEK WS bağlantısında toplu çeker.
+
+    Her (sembol, interval) için ayrı bir chart series açar; hepsi aynı bağlantıda
+    paralel resolve edilir. Döndürür: {SEMBOL_UPPER: {interval: rsi|None}}.
+    """
+    if intervals is None:
+        intervals = [5, 15, 30, 60]
+    intervals = [iv for iv in intervals if iv in _TV_INTERVALS]
+    syms = list(dict.fromkeys(s.upper() for s in symbols))
+    if not syms or not intervals:
+        return {s: {iv: None for iv in intervals} for s in syms}
+
+    results = {s: {iv: None for iv in intervals} for s in syms}
+    cs = _rand_id("cs_")
+
+    # series_id → (symbol, interval); sembol → tanıtıcı (resolve adı)
+    series_map = {}       # sid -> (SYM, iv)
+    sym_slot = {}         # SYM -> "sym0", "sym1", ...
+    for i, s in enumerate(syms):
+        sym_slot[s] = f"sym{i}"
+    for s in syms:
+        for iv in intervals:
+            series_map[f"{sym_slot[s]}_{iv}"] = (s, iv)
+
+    pending = set(series_map.keys())   # tamamlanmayı bekleyen seriler
     done = threading.Event()
     ws_ref = [None]
-
-    def _request_next(ws):
-        if current[0] >= len(iv_queue):
-            done.set()
-            return
-        # Önceki seriyi sil
-        if current[0] > 0:
-            prev_iv = iv_queue[current[0] - 1]
-            ws.send(_wrap({"m": "remove_series", "p": [cs, f"s{prev_iv}"]}))
-        iv = iv_queue[current[0]]
-        sid = f"s{iv}"
-        tv_iv = _TV_INTERVALS.get(iv)
-        if tv_iv is None:
-            done.set()
-            return
-        ws.send(_wrap({"m": "create_series", "p": [
-            cs, sid, sid, "sym", tv_iv, _RSI_PERIOD + 10
-        ]}))
+    lock = threading.Lock()
 
     def on_open(ws):
         ws_ref[0] = ws
         token = _get_tv_auth_token()
         ws.send(_wrap({"m": "set_auth_token", "p": [token]}))
         ws.send(_wrap({"m": "chart_create_session", "p": [cs, ""]}))
-        ws.send(_wrap({"m": "resolve_symbol", "p": [
-            cs, "sym", f'={{"symbol":"{tv_sym}","adjustment":"splits"}}'
-        ]}))
+        for s in syms:
+            slot = sym_slot[s]
+            ws.send(_wrap({"m": "resolve_symbol", "p": [
+                cs, slot, f'={{"symbol":"{sym_universe.tv_symbol(s)}","adjustment":"splits"}}'
+            ]}))
+            for iv in intervals:
+                sid = f"{slot}_{iv}"
+                ws.send(_wrap({"m": "create_series", "p": [
+                    cs, sid, sid, slot, _TV_INTERVALS[iv], _RSI_PERIOD + 10
+                ]}))
+
+    def _finish(sid):
+        with lock:
+            pending.discard(sid)
+            if not pending:
+                done.set()
 
     def on_message(ws, message):
         for raw in _parse_packets(message):
@@ -251,32 +222,31 @@ def fetch_tv_rsi(symbol: str, intervals: list = None) -> dict:
             m = pkt.get("m")
             p = pkt.get("p", [])
 
-            if m == "symbol_resolved":
-                _request_next(ws)
-
-            elif m == "timescale_update" and len(p) >= 2:
-                iv = iv_queue[current[0]] if current[0] < len(iv_queue) else None
-                if iv is None:
-                    continue
-                sid = f"s{iv}"
-                if sid in p[1]:
-                    bars = p[1][sid].get("s", [])
+            if m == "timescale_update" and len(p) >= 2 and isinstance(p[1], dict):
+                for sid, block in p[1].items():
+                    entry = series_map.get(sid)
+                    if entry is None or not isinstance(block, dict):
+                        continue
+                    s, iv = entry
+                    bars = block.get("s", [])
                     closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
                     if closes:
-                        results[iv] = _calc_rsi(closes)
+                        results[s][iv] = _calc_rsi(closes)
 
-            elif m == "series_completed":
-                iv = iv_queue[current[0]] if current[0] < len(iv_queue) else None
-                sid = f"s{iv}" if iv else ""
-                # p = [cs, series_name, 'streaming', ...]
-                if len(p) >= 2 and (p[1] == sid or (len(p) >= 3 and p[2] == sid)):
-                    current[0] += 1
-                    if current[0] >= len(iv_queue):
-                        done.set()
-                    else:
-                        _request_next(ws)
+            elif m == "series_completed" and len(p) >= 2:
+                # p = [cs, series_id, 'streaming', ...] veya [cs, series_id]
+                sid = p[1] if p[1] in series_map else (p[2] if len(p) >= 3 and p[2] in series_map else None)
+                if sid:
+                    _finish(sid)
 
-            elif m in ("critical_error", "series_error", "symbol_error"):
+            elif m in ("series_error", "symbol_error"):
+                # Bu seriyi(leri) beklemeyi bırak; hangileri olduğu p içinde
+                for token in p:
+                    if isinstance(token, str) and token in series_map:
+                        _finish(token)
+
+            elif m == "critical_error":
+                log.warning("TV RSI critical_error: %s", p)
                 done.set()
 
     threading.Thread(
@@ -285,91 +255,97 @@ def fetch_tv_rsi(symbol: str, intervals: list = None) -> dict:
             header={"Origin": "https://www.tradingview.com"},
             on_open=on_open,
             on_message=on_message,
-            on_error=lambda ws, e: done.set(),
+            on_error=lambda ws, e: (log.warning("TV RSI WS hatası: %s", e), done.set()),
             on_close=lambda ws, *_: done.set(),
         ).run_forever(),
         daemon=True
     ).start()
 
-    done.wait(timeout=20)
+    done.wait(timeout=25)
     if ws_ref[0]:
-        ws_ref[0].close()
+        try:
+            ws_ref[0].close()
+        except Exception:
+            pass
     return results
-
-def _fetch_yfinance(symbol: str):
-    try:
-        import yfinance as yf
-        ticker_sym = _SYMBOL_MAP.get(symbol.upper(), f"{symbol.upper()}.IS")
-        fi = yf.Ticker(ticker_sym).fast_info
-        price, prev = fi.last_price, fi.previous_close
-        if price is None or not prev:
-            return None
-        return {"symbol": symbol, "price": price, "change_pct": (price - prev) / prev * 100}
-    except Exception:
-        return None
 
 
 def fetch_all(symbols: list, callback) -> None:
+    """Fiyatları çeker; bittiğinde callback(list[dict]) çağrılır.
+
+    callback HER durumda bir kez çağrılır (hata/exception olsa da) — böylece
+    UI'daki 'Güncelleniyor…' kilidi asla kalıcı olmaz.
+    """
     if not symbols:
         callback([])
         return
 
-    bist_syms    = [s for s in symbols if not _is_special(s)]
-    special_syms = [s for s in symbols if _is_special(s)]
+    bist_syms    = [s for s in symbols if not sym_universe.is_special(s)]
+    special_syms = [s for s in symbols if sym_universe.is_special(s)]
 
     results = {}
     lock = threading.Lock()
     total = (1 if bist_syms else 0) + len(special_syms)
     remaining = [total]
+    fired = [False]
 
     def _maybe_done():
+        # lock çağıran taraf tutuyor
         remaining[0] -= 1
-        if remaining[0] == 0:
+        if remaining[0] <= 0 and not fired[0]:
+            fired[0] = True
             out = [results.get(s, {"symbol": s, "price": None, "change_pct": None}) for s in symbols]
-            callback(out)
+            try:
+                callback(out)
+            except Exception as e:
+                log.warning("fetch_all callback hatası: %s", e)
 
     def _run_bist():
-        data = fetch_tv_prices(bist_syms)
+        try:
+            data = fetch_tv_prices(bist_syms)
+        except Exception as e:
+            log.warning("BIST fiyat çekimi hatası: %s", e)
+            data = {}
         with lock:
-            for sym in bist_syms:
-                if sym.upper() in data:
-                    price, pct, vol, avg_vol = data[sym.upper()]
-                    results[sym] = {"symbol": sym, "price": price, "change_pct": pct,
-                                    "volume": vol, "avg_volume": avg_vol}
+            for s in bist_syms:
+                if s.upper() in data:
+                    price, pct, vol, avg_vol = data[s.upper()]
+                    results[s] = {"symbol": s, "price": price, "change_pct": pct,
+                                  "volume": vol, "avg_volume": avg_vol}
                 else:
-                    results[sym] = {"symbol": sym, "price": None, "change_pct": None,
-                                    "volume": None, "avg_volume": None}
+                    results[s] = {"symbol": s, "price": None, "change_pct": None,
+                                  "volume": None, "avg_volume": None}
             _maybe_done()
 
     def _run_specials_bulk():
-        ticker_syms = [_SYMBOL_MAP.get(s.upper(), f"{s.upper()}.IS") for s in special_syms]
+        ticker_syms = [sym_universe.yf_ticker(s) for s in special_syms]
+        closes = None
         try:
             import yfinance as yf
-            import math
             df = yf.download(ticker_syms, period="2d", progress=False, auto_adjust=True)
             closes = df["Close"].iloc[-2:] if len(df) >= 2 else None
-        except Exception:
+        except Exception as e:
+            log.warning("yfinance özel sembol çekimi hatası: %s", e)
             closes = None
         with lock:
-            for sym in special_syms:
-                ts = _SYMBOL_MAP.get(sym.upper(), f"{sym.upper()}.IS")
+            for s in special_syms:
+                ts = sym_universe.yf_ticker(s)
                 try:
                     if closes is not None and ts in closes.columns:
                         prev_p = float(closes[ts].iloc[-2])
                         price  = float(closes[ts].iloc[-1])
                         if math.isnan(price) or math.isnan(prev_p) or prev_p == 0:
-                            results[sym] = {"symbol": sym, "price": None, "change_pct": None}
+                            results[s] = {"symbol": s, "price": None, "change_pct": None}
                         else:
-                            results[sym] = {"symbol": sym, "price": price,
-                                            "change_pct": (price - prev_p) / prev_p * 100}
+                            results[s] = {"symbol": s, "price": price,
+                                          "change_pct": (price - prev_p) / prev_p * 100}
                     else:
-                        results[sym] = {"symbol": sym, "price": None, "change_pct": None}
+                        results[s] = {"symbol": s, "price": None, "change_pct": None}
                 except Exception:
-                    results[sym] = {"symbol": sym, "price": None, "change_pct": None}
+                    results[s] = {"symbol": s, "price": None, "change_pct": None}
                 _maybe_done()
 
     if bist_syms:
         threading.Thread(target=_run_bist, daemon=True).start()
     if special_syms:
         threading.Thread(target=_run_specials_bulk, daemon=True).start()
-

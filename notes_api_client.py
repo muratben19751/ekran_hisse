@@ -3,13 +3,23 @@ import urllib.request
 import json
 
 import config
+from applog import log
 
 GIST_ID      = config.GIST_ID
 GITHUB_TOKEN = config.GITHUB_TOKEN
 
+
+class NotConfigured(Exception):
+    """GIST_ID/GITHUB_TOKEN eksik — kurulum tamamlanmamış."""
+
+
+def is_configured() -> bool:
+    return bool(GIST_ID and GITHUB_TOKEN)
+
+
 def _gist_api():
     if not GIST_ID:
-        raise ValueError("GIST_ID yapılandırılmamış — notes_config.env dosyasını kontrol edin")
+        raise NotConfigured("GIST_ID yapılandırılmamış — notes_config.env / Keychain kontrol edin")
     return f"https://api.github.com/gists/{GIST_ID}"
 
 _save_lock   = threading.Lock()
@@ -34,8 +44,11 @@ def fetch_notes(callback):
             content = data["files"]["notes.json"]["content"]
             notes = json.loads(content).get("notes", [])
             callback(notes)
+        except NotConfigured as e:
+            log.info("notes fetch atlandı: %s", e)
+            callback("unconfigured")
         except Exception as e:
-            print("notes fetch hatası:", e)
+            log.warning("notes fetch hatası: %s", e)
             callback(None)
     threading.Thread(target=_run, daemon=True).start()
 
@@ -73,6 +86,6 @@ def _save_worker():
             if callback:
                 callback(True)
         except Exception as e:
-            print("notes save hatası:", e)
+            log.warning("notes save hatası: %s", e)
             if callback:
                 callback(None)

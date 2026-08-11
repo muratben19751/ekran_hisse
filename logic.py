@@ -4,9 +4,19 @@ Bu modüldeki hiçbir fonksiyon Qt/PySide6'ya, ağ'a veya diske dokunmaz.
 overlay.py bunları çağırır; testler doğrudan import edip test edebilir.
 """
 
+import math
 import re
+from datetime import datetime, timezone
 
 _SEP_SYMBOL = "---"
+# Bölüm uid alan ayracı: bölüm adında ':' geçse bile çakışmaması için görünmez
+# birim-ayracı (US, \x1f) kullanılır. Eski ':' formatı geriye dönük okunur.
+_SEP_FIELD = "\x1f"
+
+
+def make_sep_symbol(name: str, counter) -> str:
+    """Bölüm adı + sayaçtan uid üret: '---\\x1f<ad>\\x1f<sayaç>'."""
+    return f"{_SEP_SYMBOL}{_SEP_FIELD}{name}{_SEP_FIELD}{counter}"
 
 
 def tr_number(v, d=2):
@@ -15,11 +25,34 @@ def tr_number(v, d=2):
     return s.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
 
 
+def tw_ago(iso, now=None):
+    """'2026-07-31T11:02:00.000Z' → 'şimdi' / '12dk' / '3sa' / '2g'.
+
+    now verilmezse UTC şimdi kullanılır (test için enjekte edilebilir).
+    """
+    if not iso:
+        return ""
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso[11:16]
+    ref = now or datetime.now(timezone.utc)
+    secs = (ref - t).total_seconds()
+    if secs < 60:
+        return "şimdi"
+    if secs < 3600:
+        return f"{int(secs // 60)}dk"
+    if secs < 86400:
+        return f"{int(secs // 3600)}sa"
+    return f"{int(secs // 86400)}g"
+
+
 def parse_price(val: str) -> float:
     """'1.234,50' / '62,30' / '62.30' / '1,234.50' → float. Bozuk girdide ValueError.
 
     Hem ',' hem '.' varsa: SONDAKİ ayraç ondalık kabul edilir, diğeri binlik
     ayracı sayılıp silinir (TR '1.234,50' ve US '1,234.50' ikisi de doğru).
+    inf/nan gibi sonlu olmayan değerler reddedilir.
     """
     v = val.strip()
     if ',' in v and '.' in v:
@@ -29,12 +62,21 @@ def parse_price(val: str) -> float:
             v = v.replace(',', '')
     else:
         v = v.replace(',', '.')
-    return float(v)
+    f = float(v)
+    if not math.isfinite(f):
+        raise ValueError(f"sonlu olmayan sayı: {val!r}")
+    return f
 
 
 def parse_sep_symbol(symbol: str):
-    """'---:Ad:3' → ('Ad', '3'); '---:Ad' → ('', 'Ad'); diğer → ('', '0')."""
-    parts = symbol.split(":", 2)
+    """Bölüm uid → (ad, sayaç). Yeni '\\x1f' ve eski ':' formatını okur.
+
+    '---\\x1fAd\\x1f3' → ('Ad', '3'); '---:Ad:3' → ('Ad', '3');
+    '---:Ad' → ('', 'Ad'); diğer → ('', '0'). Ad içinde ':' geçse bile
+    yeni formatta doğru ayrışır (ayraç görünmez birim-ayracıdır).
+    """
+    sep = _SEP_FIELD if _SEP_FIELD in symbol else ":"
+    parts = symbol.split(sep, 2)
     if len(parts) == 3:
         return parts[1], parts[2]
     if len(parts) == 2:
@@ -52,18 +94,30 @@ def twitter_query(symbols) -> str:
     return "(" + " OR ".join(syms) + ") lang:tr -is:retweet"
 
 
+_SYM_RE_CACHE = {}
+
+
+def _sym_regex(s: str):
+    r = _SYM_RE_CACHE.get(s)
+    if r is None:
+        # kelime sınırı: harf/rakam olmayan ya da $ ile çevrili
+        r = re.compile(rf"(?<![A-Z0-9]){re.escape(s.upper())}(?![A-Z0-9])")
+        _SYM_RE_CACHE[s] = r
+    return r
+
+
 def symbol_of_tweet(text: str, symbols) -> str:
     """Tweet metninde geçen ilk izlenen sembolü döndür (kelime sınırıyla).
 
     Substring yerine kelime sınırı kullanılır: 'AL' sembolü 'ALARM' içinde
-    eşleşmez, ama '$AL', 'AL ', '#AL' eşleşir.
+    eşleşmez, ama '$AL', 'AL ', '#AL' eşleşir. Regex'ler sembol başına
+    derlenip önbelleğe alınır (her tweet için yeniden derlenmez).
     """
     up = text.upper()
     for s in symbols:
         if not s:
             continue
-        # kelime sınırı: harf/rakam olmayan ya da $ ile çevrili
-        if re.search(rf"(?<![A-Z0-9]){re.escape(s)}(?![A-Z0-9])", up):
+        if _sym_regex(s).search(up):
             return s
     return ""
 

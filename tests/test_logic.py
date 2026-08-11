@@ -2,12 +2,37 @@
 
 import os
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import logic
+
+
+# ── tw_ago ────────────────────────────────────────────────────────────────────
+_NOW = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("iso,expected", [
+    ("2026-08-11T11:59:30.000Z", "şimdi"),   # 30 sn
+    ("2026-08-11T11:48:00.000Z", "12dk"),    # 12 dk
+    ("2026-08-11T09:00:00.000Z", "3sa"),     # 3 saat
+    ("2026-08-09T12:00:00.000Z", "2g"),      # 2 gün
+])
+def test_tw_ago(iso, expected):
+    assert logic.tw_ago(iso, now=_NOW) == expected
+
+
+def test_tw_ago_empty():
+    assert logic.tw_ago("") == ""
+
+
+def test_tw_ago_malformed_falls_back_to_time_slice():
+    # Parse edilemeyen iso → iso[11:16] dilimi döner
+    bad = "XXXXXXXXXXX15:30stuff"
+    assert logic.tw_ago(bad, now=_NOW) == bad[11:16]
 
 
 # ── tr_number ────────────────────────────────────────────────────────────────
@@ -46,6 +71,13 @@ def test_parse_price_invalid(bad):
         logic.parse_price(bad)
 
 
+@pytest.mark.parametrize("bad", ["inf", "-inf", "nan", "Infinity"])
+def test_parse_price_rejects_non_finite(bad):
+    # inf/nan float() ile parse edilir ama finansal değer değildir → ValueError
+    with pytest.raises(ValueError):
+        logic.parse_price(bad)
+
+
 # ── parse_sep_symbol ─────────────────────────────────────────────────────────
 @pytest.mark.parametrize("sym,expected", [
     ("---:Bankalar:3", ("Bankalar", "3")),
@@ -56,6 +88,26 @@ def test_parse_price_invalid(bad):
 ])
 def test_parse_sep_symbol(sym, expected):
     assert logic.parse_sep_symbol(sym) == expected
+
+
+# ── make_sep_symbol / parse round-trip (yeni \x1f formatı) ────────────────────
+def test_make_sep_symbol_roundtrip():
+    uid = logic.make_sep_symbol("Bankalar", 3)
+    assert logic.parse_sep_symbol(uid) == ("Bankalar", "3")
+
+
+def test_sep_symbol_name_with_colon():
+    # Bölüm adında ':' geçse bile yeni format doğru ayrışır (eski ':' formatı bozardı)
+    uid = logic.make_sep_symbol("Saat 15:30", 7)
+    name, counter = logic.parse_sep_symbol(uid)
+    assert name == "Saat 15:30"
+    assert counter == "7"
+
+
+def test_sep_symbol_starts_with_sep():
+    # group_stocks ayracı _SEP_SYMBOL ile başlamaya güvenir
+    uid = logic.make_sep_symbol("X", 0)
+    assert uid.startswith(logic._SEP_SYMBOL)
 
 
 # ── twitter_query ────────────────────────────────────────────────────────────
@@ -76,6 +128,14 @@ def test_twitter_query_filters_empty_strings():
 
 
 # ── symbol_of_tweet ──────────────────────────────────────────────────────────
+def test_symbol_of_tweet_regex_cached():
+    # İlk çağrı regex'i derleyip önbelleğe koyar; ikinci çağrı aynı sonucu verir.
+    logic._SYM_RE_CACHE.clear()
+    assert logic.symbol_of_tweet("THYAO ucdu", ["THYAO"]) == "THYAO"
+    assert "THYAO" in logic._SYM_RE_CACHE   # önbelleğe alındı
+    assert logic.symbol_of_tweet("yine THYAO", ["THYAO"]) == "THYAO"
+
+
 def test_symbol_of_tweet_word_boundary():
     # "AL" 'ALARM' içinde eşleşMEmeli
     assert logic.symbol_of_tweet("ALARM verildi bugun", ["AL"]) == ""

@@ -133,7 +133,7 @@ echo "╔═══════════════════════�
 echo "║         Kurulum Tamamlandı ✓         ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
-echo "  Ekranın sağ kenarında mavi ◀ sekmesi görünüyor olmalı."
+echo "  Ekranın sağ kenarında ◧ (portföy) sekmesi görünüyor olmalı."
 echo "  Tıklayınca panel açılır, + ile hisse ekleyebilirsin."
 echo ""
 echo "  Kaldırmak için: kaldır.command dosyasını çalıştır."

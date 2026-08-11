@@ -3,7 +3,11 @@
 RESOURCES="$(cd "$(dirname "$0")/../Resources" && pwd)"
 LOG="$HOME/Library/Logs/EkranHisse.log"
 
-pkill -f "EkranHisse/Contents/Resources/main.py" 2>/dev/null
+# Zaten çalışan örneği kapat. main.py mutlak yolla başlatıldığı için komut
+# satırında Resources yolu görünür; pkill bununla eşleşir. (Ayrıca main.py
+# içindeki fcntl kilidi ikinci örneği zaten engeller; bu, yeniden başlatmayı
+# temizler.)
+pkill -f "$RESOURCES/main.py" 2>/dev/null
 
 cd "$RESOURCES"
-exec arch -arm64 /usr/bin/python3 -W ignore main.py >> "$LOG" 2>&1
+exec arch -arm64 /usr/bin/python3 -W ignore "$RESOURCES/main.py" >> "$LOG" 2>&1

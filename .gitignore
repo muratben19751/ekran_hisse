@@ -12,3 +12,18 @@ tw_symbols.json
 # Tasarım paketleri ve alakasız dosyalar
 *.zip
 test.php
+
+# .app bundle'ındaki kod kopyaları build çıktısıdır (install.sh üretir).
+# Kaynak proje kökünde tek yerde tutulur; bundle'a git ile taşınmaz.
+EkranHisse.app/Contents/Resources/main.py
+EkranHisse.app/Contents/Resources/overlay.py
+EkranHisse.app/Contents/Resources/logic.py
+EkranHisse.app/Contents/Resources/data_fetcher.py
+EkranHisse.app/Contents/Resources/config.py
+EkranHisse.app/Contents/Resources/notes_api_client.py
+EkranHisse.app/Contents/Resources/twitter_client.py
+EkranHisse.app/Contents/Resources/applog.py
+EkranHisse.app/Contents/Resources/symbols.py
+EkranHisse.app/Contents/Resources/symbols.json
+EkranHisse.app/Contents/Resources/.ekranhisse.lock
+

@@ -42,3 +42,24 @@
 - 5 yeni özellik (F1–F5): floating toggle, monitör geçişi, sürükleme, floating=açıkken kapanmama, _current_sc monitör-aware
 
 **Lint:** 0 broken_links, 0 orphans, 0 missing_summary, 0 stubs
+
+## 2026-08-12 — DeepR 3. tur senkronu — 22 fix + adversarial doğrulama
+
+**Yeni kaynak:** `sources/03_deepr_review_round2_2026-08-12.md` (immutable ham kayıt)
+**Güncellenen:** `known_issues.md`, `architecture_overview.md`
+**Yeni entity:** `paths`, `symbols`, `twitter_client` (içerikle dolu)
+
+**Özet:**
+- known_issues: G34–G55 "Giderilen (3. tur, commit e54430b)" eklendi; stocks.json +
+  ölü PHP backend "Kritik/Yüksek açık"tan düştü; _twitter_render filtre-rebuild, XU050,
+  ruff yokluğu, E2E test boşluğu, Twitter 429 retry kapandı.
+- architecture_overview: sır okuma Keychain-öncelikli + `.env` geçiş fallback gerçeğe
+  çekildi; paths/symbols/twitter_client/applog modül haritası; thread modeli
+  rsi_done/tw_poll_error + WS ping/timeout + auth negatif cache.
+- Bilinçli kapsam: `save_notes` çok-cihaz not-ezme yalnız belgelendi (merge kapsam dışı).
+
+**Doğrulama:** 22 fix adversarial `unfixed_count: 0`; ek tur RSI try/finally + ölen 6
+bulgu 6/6 CONFIRMED. Test 191→200, ruff/pyflakes temiz.
+
+**Lint (sonrası):** backlinks 9 sayfa + index yenilendi; broken_links/orphans/
+missing_summary/stubs = 0.

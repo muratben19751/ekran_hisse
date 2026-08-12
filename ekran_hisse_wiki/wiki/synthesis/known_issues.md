@@ -1,18 +1,19 @@
 ---
 title: Bilinen Sorunlar
 type: synthesis
-summary: EkranHisse'de DeepR review ve canlı doğrulamayla tespit edilen açık bug'lar ve teknik borç; 2026-08-11 itibarıyla çözülen maddeler işaretli.
+summary: EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar ve teknik borç; 3. tur (22 fix) adversarial doğrulamayla kapandı, kalan açık maddeler işaretli.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
+  - sources/03_deepr_review_round2_2026-08-12.md
 related:
   - wiki/synthesis/architecture_overview.md
-last_updated: 2026-08-11
+last_updated: 2026-08-12
 ---
 
 # Bilinen Sorunlar
 
-İki ayrı DeepR review turu (2026-08-06 ve 2026-08-11) ile ortaya çıkan sorunlar. Commit `b802327` (2026-08-07) ilk turu, bu oturum (2026-08-11) ikinci turu kapatmıştır.
+Üç DeepR review turu (2026-08-06, 2026-08-11, 2026-08-12) ile ortaya çıkan sorunlar. Commit `b802327` (2026-08-07) ilk turu, `d8de974`/oturum (2026-08-11) ikinci turu, `e54430b` (2026-08-12) üçüncü turu kapatmıştır. Üçüncü tur tamamı **adversarial doğrulamadan** geçti (`unfixed_count: 0`).
 
 ---
 
@@ -75,30 +76,53 @@ last_updated: 2026-08-11
 
 ---
 
+## ✅ Giderilen (2026-08-12, 3. tur — commit e54430b, adversarial doğrulandı)
+
+| # | Sorun | Düzeltme |
+|---|-------|----------|
+| G34 | Sheet dialog açılınca panel modal-kör kapanıyordu | `_modal_open()` guard (4 kapanma yolu) + test |
+| G35 | TV WS NaN fiyat → sparkline paint çökmesi (`float('nan') is not None`) | `data_fetcher` isnan filtresi + `Sparkline.push` NaN/None guard |
+| G36 | Twitter poll hatası yutuluyordu | `tw_poll_error` Signal + status/log |
+| G37 | Fiyat var ama `change_pct` None ise sparkline güncellenmiyordu | `push` koşulsuz (if/else dışına) |
+| G38 | Hedef girişi geçersiz sayıda sessizce None kaydediyordu | `_INVALID` sentinel + kırmızı kenar + accept reddi |
+| G39 | Silinip yeniden eklenen hisse bayat fiyat | `_last_data.pop(symbol)` |
+| G40 | Floating modda monitör değişince panel görünmez | `_reposition_to_screen` genişlik senkronu |
+| G41 | 𝕏 chip sayaçları çakışan sembollerde yanıltıcı | `symbols_of_tweet` (çok-sembol) |
+| G42 | RSI worker `_rsi_fetching`'i ana thread dışından yazıyor | `rsi_done` Signal + `_on_rsi_done`; emit `try/finally` içinde |
+| G43 | `~/.ekranhisse` üç modülde bağımsız hardcode | yeni `paths.py` (tek kaynak) |
+| G44 | WS `run_forever` thread'i sızabilir | `ping_interval`/`ping_timeout` + `setdefaulttimeout` |
+| G45 | TV auth token negatif sonucu cache'lenmiyor | negatif TTL cache (60 sn) |
+| G46 | `_calc_rsi` warm-up bar yetersiz (24) | `_RSI_WARMUP_BARS = 150` |
+| G47 | import anında sır snapshot — kurulum sırası hatası | setup.command blocking `read` + Keychain recheck |
+| G48 | Doküman "Hedef rozeti"+"track" UI'da yok; `C_TRACK` ölü sabit | doküman gerçeğe çekildi + ölü sabit silindi |
+| G49 | **stocks.json konumu** — bundle Resources'a yazılıyordu | `~/.ekranhisse` (`paths.py`) + `.gitignore`; migrasyon |
+| G50 | **`notes_api.php` ölü PHP backend** | `notes_api.php`/`test.php` repo'dan kaldırıldı (Gist mimarisi) |
+| G51 | `_twitter_render` filtre değişiminde tüm widget'ları yıkıyordu | show/hide görünürlük filtresi (`_twitter_set_filter`) |
+| G52 | `XU050` `_BIST_SYMBOLS`'te var ama data_fetcher haritalarında yok | `symbols.py` tek kaynak (BIST ∪ SPECIALS = KNOWN) |
+| G53 | Lint/tip aracı kurulu değil | `pyproject.toml` + `dev-requirements.txt` (ruff); "All checks passed" |
+| G54 | E2E/unit test boşluğu — `OverlayWindow` hiç örneklenmiyordu | offscreen QApplication testleri (191→200) |
+| G55 | Twitter API 429 için retry/backoff yok | `twitter_client.py` Retry-After + sınırlı yeniden deneme |
+
+**Bilinçli kapsam kararı (belgeleme fix'i):** `save_notes` latest-wins çok cihazda not eziyor — gerçek ETag/CRDT merge kapsam dışı ve riskli görüldü; yalnız docstring + kullanıcı dokümanında **belgelendi**. Kod değişmedi.
+
+---
+
 ## Kritik / Yüksek (hâlâ açık)
 
-### stocks.json konumu
-- Bundle içindeki `Contents/Resources/stocks.json`'a yazılıyor; doğru çözüm `~/Library/Application Support/EkranHisse/`.
-
-### Notlar backend'i tutarsız — PHP ölü kod
-- `notes_api.php` hiçbir yerden çağrılmıyor; `NASIL-UYGULANIR.md` yanıltıcı.
+- ✅ Bu kategoride açık madde kalmadı (stocks.json ve PHP backend 3. turda kapandı).
 
 ---
 
 ## Orta / Düşük (açık)
 
-- **`_twitter_render`** her çağrıda tüm widget'ları yıkıp yeniden kuruyor — filtre değişiminde show/hide yeterli.
 - **`_rebuild_rows`** her mutasyonda tam rebuild — 50 hissede her etkileşimde 50 widget yeniden oluşturuluyor.
-- **`TargetBar`** sınıfı hiç örneklenmiyor — ölü kod.
-- **Twitter sembol sayısı** limitsiz; ~40+ sembolde 512 byte Twitter API limitini aşıyor.
-- **Twitter API 429** için retry/backoff yok.
-- **`TWITTER_QUERY`** env'de tanımlı ama okunmuyor — dead config.
-- **`XU050`** `_BIST_SYMBOLS`'te var ama `data_fetcher` haritalarında yok.
-- **Lint/tip aracı** (ruff/mypy) kurulu değil.
-- **E2E test** hiç yok — `OverlayWindow` hiç örneklenmiyor.
-- **TV auth token** sonsuz cache; oturum süresi dolunca yenileme yok.
+- **`TargetBar`** sınıfı hiç örneklenmiyor — ölü kod (doğrula/kaldır).
+- **Twitter sembol sayısı** limitsiz; ~40+ sembolde 512 byte Twitter API limitini aşabilir.
+- **`TWITTER_QUERY`** env'de tanımlı ama okunmuyor — dead config (doğrula).
+- **TV auth token** oturum süresi dolunca yenilenmiyor (negatif cache eklendi ama pozitif TTL/refresh yok).
 - **Not editörü** karakter limiti yok; GitHub Gist 10 MB sınırı.
-- **Bölüm adında `:` karakteri** sembol ayrıştırmasını bozuyor.
+- **Bölüm adında `:` karakteri** sembol ayrıştırmasını bozabiliyor (doğrula).
+- **Çok cihaz not senkronu** last-write-wins — eşzamanlı düzenlemede kayıp (belgeli, çözülmedi).
 
 ---
 
@@ -117,4 +141,5 @@ last_updated: 2026-08-11
 - [[architecture_overview]]
 - [[data_fetcher]]
 - [[overlay_window]]
+- [[twitter_client]]
 <!-- BACKLINKS:END -->

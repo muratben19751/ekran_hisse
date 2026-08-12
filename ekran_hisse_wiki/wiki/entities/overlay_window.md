@@ -81,6 +81,8 @@ Taşıma sırasında `self._current_sc` güncellenir.
 - [[architecture_overview]]
 - [[data_fetcher]]
 - [[known_issues]]
+- [[paths]]
 - [[sparkline]]
 - [[stock_row]]
+- [[twitter_client]]
 <!-- BACKLINKS:END -->

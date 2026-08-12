@@ -1,11 +1,12 @@
 ---
 title: Mimari Genel Bakış
 type: synthesis
-summary: EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü, floating/monitör yönetimi, uygulama paketi ve env-tabanlı sır yönetimi.
+summary: EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü, paths/symbols/twitter_client/applog modülleri, floating/monitör yönetimi ve Keychain-öncelikli sır yönetimi.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
-last_updated: 2026-08-11
+  - sources/03_deepr_review_round2_2026-08-12.md
+last_updated: 2026-08-12
 ---
 
 # Mimari Genel Bakış
@@ -36,9 +37,27 @@ TradingView WebSocket
 
 ## Thread modeli
 - Ana thread: Qt event loop
-- Arka plan thread'leri: TV WebSocket (daemon), RSI fetch (Semaphore(4)), not fetch (serialize worker)
+- Arka plan thread'leri: TV WebSocket (daemon, `ping_interval`/`ping_timeout` + `setdefaulttimeout`), RSI fetch, not fetch (serialize worker), Twitter poll
 - Thread → UI köprüsü: `Signal/Slot` (`_AppSignals` QObject; `notes_signal = Signal(object)` — `None` taşıyabilir)
-- **Auth token:** `_tv_auth_token_lock` ile thread-safe cache
+- **Durum yalnız ana thread'de değişir.** Worker'lar sonucu Signal ile geçirir:
+  `data_signal`, `notes_signal`, `rsi_signal`, ve OverlayWindow-yerel `tw_poll_error`,
+  `rsi_done`. Örn. RSI worker biterken `rsi_done.emit()` (bir `try/finally` içinde) →
+  `_on_rsi_done` ana thread'de `_rsi_fetching=False` yapar (cross-thread yazım yok).
+- **Auth token:** `_tv_auth_token_lock` ile thread-safe cache; başarısız denemede
+  negatif TTL cache (60 sn) tekrarlı HTTP'yi önler.
+
+## Modül haritası
+| Modül | Rol |
+|-------|-----|
+| `main.py` | Giriş; `paths.ensure_data_dir()`, `fcntl` tek-instance kilidi, Qt app + Signal kablaj |
+| `overlay.py` | Tüm UI: `OverlayWindow`, `StockRow`, `Sparkline`, sheet'ler, floating/monitör |
+| `data_fetcher.py` | TV WebSocket fiyat/RSI + yfinance özel semboller; NaN/timeout korumalı |
+| [[paths]] | `~/.ekranhisse` yol politikası tek kaynak (`DATA_DIR`/`ensure_data_dir`/`data_file`) |
+| [[symbols]] | Sembol evreni tek kaynak (`symbols.json` → BIST ∪ SPECIALS = KNOWN; yf & tv eşlemesi) |
+| [[twitter_client]] | 𝕏 API ağ katmanı (UI'dan ayrık; 429 Retry-After + sınırlı retry) |
+| `notes_api_client.py` | GitHub Gist not senkronu (last-write-wins) |
+| `config.py` | Sır okuma: Keychain-öncelikli, `.env` geçiş fallback |
+| `applog.py` | Merkezî logger (konsol + `~/Library/Logs/EkranHisse.log`) |
 
 ## Pencere yönetimi (2026-08-11)
 
@@ -62,9 +81,21 @@ TradingView WebSocket
 - `main.py`, `_apply_float`, `_reposition_to_screen` hepsi bu sabiti kullanır (DRY)
 
 ## Güvenlik ve yapılandırma
-Tüm sırlar `~/.ekranhisse/notes_config.env`'de tutulur; yok ise proje dizinindeki `notes_config.env`'e fallback. `config.py` üzerinden tek noktadan okunur: `GIST_ID`, `GITHUB_TOKEN`, `TWITTER_BEARER_TOKEN`, `TV_SESSION_ID`. **Bundle'da credentials tutulmaz.**
+Sırlar `config.py` üzerinden tek noktadan okunur: `GIST_ID`, `GITHUB_TOKEN`,
+`TWITTER_BEARER_TOKEN`, `TV_SESSION_ID`. Okuma sırası: **önce macOS Keychain**
+(`_keychain_get`, `security` CLI), yoksa `~/.ekranhisse/notes_config.env` düz-metin
+**geçiş** fallback'i (bulunursa bir kez güvenlik uyarısı verilir). **Bundle'da
+credentials tutulmaz.** Sabitler import anında bir kez okunur (snapshot); uygulama
+açıkken eklenen sır süreç yeniden başlatılana dek görülmez.
 
-`GIST_ID` boşsa `notes_api_client._gist_api()` anında `ValueError` fırlatır — sessiz geçersiz URL üretilmez.
+`GIST_ID` boşsa `notes_api_client._gist_api()` anında `ValueError` fırlatır — sessiz
+geçersiz URL üretilmez.
+
+## Kalıcılık ve yol politikası
+Tüm kalıcı veri (`stocks.json`, `tw_symbols.json`, `notes_config.env`, `.ekranhisse.lock`)
+`~/.ekranhisse` altında; yol politikası [[paths]] modülünde tek kaynak. `stocks.json`
+artık bundle Resources'a YAZILMAZ (kullanıcı verisi; `.gitignore`'da). Atomik JSON
+yazımı: tmp dosyaya yaz + `os.replace` (yazma hatasında mevcut dosya bozulmaz).
 
 ## Uygulama paketi senkronizasyonu
 `EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. **Tek aktif kaynak proje köküdür.**
@@ -87,6 +118,9 @@ Tüm sırlar `~/.ekranhisse/notes_config.env`'de tutulur; yok ise proje dizinind
 - [[data_fetcher]]
 - [[sparkline]]
 - [[stock_row]]
+- [[paths]]
+- [[symbols]]
+- [[twitter_client]]
 - [[known_issues]]
 
 <!-- BACKLINKS:BEGIN -->
@@ -94,4 +128,7 @@ Tüm sırlar `~/.ekranhisse/notes_config.env`'de tutulur; yok ise proje dizinind
 
 - [[known_issues]]
 - [[overlay_window]]
+- [[paths]]
+- [[symbols]]
+- [[twitter_client]]
 <!-- BACKLINKS:END -->

@@ -1,6 +1,7 @@
 """EkranHisse — Yoğun HUD overlay penceresi."""
 
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -18,30 +19,88 @@ except Exception:
     _COLLECTION_BEHAVIOR = None
 
 from PySide6.QtCore import (
-    Qt, QTimer, QPropertyAnimation, QEasingCurve, Signal, QMimeData, QPoint, QEvent
+    QEasingCurve,
+    QEvent,
+    QMimeData,
+    QPoint,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    Signal,
 )
-from PySide6.QtGui import QFont, QPainter, QColor, QDrag, QPixmap
+from PySide6.QtGui import QColor, QDrag, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QApplication,
-    QSizePolicy, QMenu, QListWidget, QTextEdit, QLineEdit, QDialog,
-    QScrollArea, QFrame,
+    QApplication,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMenu,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
 
-from data_fetcher import fetch_all, fetch_tv_rsi_bulk
-from notes_api_client import fetch_notes, save_notes
-import twitter_client
 import config
+import paths
 import symbols as sym_universe
+import twitter_client
 from applog import log
+from data_fetcher import fetch_all, fetch_tv_rsi_bulk
 from logic import (
-    tr_number, parse_price, parse_sep_symbol, twitter_query,
-    symbol_of_tweet, compute_unread, group_stocks,
-    next_separator_counter, reorder, make_sep_symbol, tw_ago, _SEP_SYMBOL,
+    _SEP_SYMBOL,
+    compute_unread,
+    group_stocks,
+    make_sep_symbol,
+    next_separator_counter,
+    parse_price,
+    parse_sep_symbol,
+    reorder,
+    sanitize_notes,
+    sanitize_stocks,
+    symbols_of_tweet,
+    tr_number,
+    tw_ago,
+    twitter_query,
 )
+from notes_api_client import fetch_notes, save_notes
 
-STOCKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stocks.json")
-TW_SYMBOLS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tw_symbols.json")
+# ── Kalıcı kullanıcı verisi ~/.ekranhisse altında ────────────────────────────
+# Portföy ve takip sembolleri kullanıcı verisidir; sırlar/notlar gibi kullanıcı
+# dizininde tutulur. .app bundle salt-okunur/güncellemede ezilebilir olduğundan
+# kod dizinine YAZILMAZ. Eski konumdaki (kaynak dizini) dosyalar ilk çalıştırmada
+# bir kez migrate edilir. Yol politikası tek yerde: paths modülü.
+_LEGACY_DIR = os.path.dirname(os.path.abspath(__file__))
+STOCKS_FILE = paths.data_file("stocks.json")
+TW_SYMBOLS_FILE = paths.data_file("tw_symbols.json")
+_LEGACY_STOCKS = os.path.join(_LEGACY_DIR, "stocks.json")
+_LEGACY_TW = os.path.join(_LEGACY_DIR, "tw_symbols.json")
 REFRESH_INTERVAL_MS = 60_000
+
+
+def _ensure_data_dir():
+    # Ortak politika: paths.ensure_data_dir (makedirs + OSError'da ~ fallback).
+    paths.ensure_data_dir()
+
+
+def _migrate_legacy(user_path, legacy_path):
+    """Eski kaynak-dizini dosyasını bir kez kullanıcı dizinine taşı."""
+    if os.path.exists(user_path) or not os.path.exists(legacy_path):
+        return
+    _ensure_data_dir()
+    try:
+        with open(legacy_path, encoding="utf-8") as src:
+            content = src.read()
+        with open(user_path, "w", encoding="utf-8") as dst:
+            dst.write(content)
+        log.info("kullanıcı verisi taşındı: %s → %s", legacy_path, user_path)
+    except OSError as e:
+        log.warning("veri taşınamadı (%s → %s): %s", legacy_path, user_path, e)
 
 # ── Geometri ────────────────────────────────────────────────────────────────
 PANEL_W = 300
@@ -78,7 +137,6 @@ C_RED_INK   = "#2b0603"
 C_BLUE      = "#0a84ff"
 C_BLUE_HOVER = "#3d9bff"
 C_YELLOW    = "#ffd60a"
-C_TRACK     = "rgba(255, 255, 255, 32)"
 C_SHEET_BG  = "rgba(44, 44, 46, 246)"
 C_TINT_TGT  = "rgba(255, 214, 10, 20)"
 C_TINT_NEW  = "rgba(10, 132, 255, 20)"
@@ -127,7 +185,35 @@ def _set_ns_window_level(win, level: int = 1001, collection_behavior=None, make_
         log.warning("_set_ns_window_level: %s", e)
 
 
+_save_warned = set()
+
+
+def _save_json(path, data):
+    """JSON'u atomik yaz (tempfile + os.replace). Hata bir kez uyarılır."""
+    tmp = None
+    try:
+        _ensure_data_dir()
+        dir_ = os.path.dirname(path)
+        with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False,
+                                         suffix=".tmp", encoding="utf-8") as f:
+            tmp = f.name
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        _save_warned.discard(path)
+    except OSError as e:
+        if path not in _save_warned:
+            _save_warned.add(path)
+            import warnings
+            warnings.warn(f"_save_json: {path} yazılamadı: {e}", stacklevel=2)
+        if tmp and os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 def load_stocks():
+    _migrate_legacy(STOCKS_FILE, _LEGACY_STOCKS)
     if not os.path.exists(STOCKS_FILE):
         return []
     try:
@@ -139,38 +225,18 @@ def load_stocks():
         return []
     if data and isinstance(data[0], str):
         return [{"symbol": s, "entry": None, "exit": None} for s in data]
-    # eksik "symbol" alanı olan bozuk kayıtları ele
-    return [s for s in data if isinstance(s, dict) and "symbol" in s]
-
-
-_save_stocks_warned = False
+    # Bozuk/elle düzenlenmiş kayıtları ele: symbol'ü boş-olmayan string olmayan
+    # kayıtlar group_stocks/reorder içinde AttributeError ile UI'ı çökertmesin.
+    return sanitize_stocks(data)
 
 
 def save_stocks(stocks):
-    global _save_stocks_warned
-    tmp = None
-    try:
-        dir_ = os.path.dirname(STOCKS_FILE)
-        with tempfile.NamedTemporaryFile("w", dir=dir_, delete=False,
-                                         suffix=".tmp", encoding="utf-8") as f:
-            tmp = f.name
-            json.dump(stocks, f, ensure_ascii=False)
-        os.replace(tmp, STOCKS_FILE)
-        _save_stocks_warned = False
-    except OSError as e:
-        if not _save_stocks_warned:
-            _save_stocks_warned = True
-            import warnings
-            warnings.warn(f"save_stocks: {STOCKS_FILE} yazılamadı: {e}", stacklevel=2)
-        if tmp and os.path.exists(tmp):
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+    _save_json(STOCKS_FILE, stocks)
 
 
 def load_tw_symbols():
     """𝕏 takip sembolleri; dosya yoksa/bozuksa varsayılan ['TTKOM']."""
+    _migrate_legacy(TW_SYMBOLS_FILE, _LEGACY_TW)
     if not os.path.exists(TW_SYMBOLS_FILE):
         return ["TTKOM"]
     try:
@@ -185,11 +251,7 @@ def load_tw_symbols():
 
 
 def save_tw_symbols(symbols):
-    try:
-        with open(TW_SYMBOLS_FILE, "w") as f:
-            json.dump(symbols, f, ensure_ascii=False)
-    except OSError:
-        pass
+    _save_json(TW_SYMBOLS_FILE, symbols)
 
 
 def _pill(text, primary=False, width=None):
@@ -474,6 +536,11 @@ class TargetSheet(_SheetDialog):
         self.inp_entry.setFocus()
         self._place(292, 150)
 
+    # Boş girdi ile geçersiz girdiyi AYIRT etmek için sentinel: boş alan hedefi
+    # bilinçli olarak temizler (None, geçerli); '71x' gibi çözümlenemeyen girdi
+    # ise _INVALID döner ve _save accept'i engeller (sessizce None kaydetmez).
+    _INVALID = object()
+
     def _num(self, text):
         text = text.strip()
         if not text:
@@ -481,44 +548,35 @@ class TargetSheet(_SheetDialog):
         try:
             return _parse_price(text)
         except ValueError:
-            return None
+            return self._INVALID
+
+    def _mark_invalid(self, inp, bad):
+        # Geçersiz alanı kırmızı kenarlıkla işaretle; kullanıcı düzeltince temizlenir.
+        border = C_RED if bad else C_BORDER
+        inp.setStyleSheet(
+            f"QLineEdit {{ background: {C_FIELD}; border: 1px solid {border};"
+            f" border-radius: {R_BTN}px; color: {C_TEXT}; padding: 0 9px; }}"
+            f"QLineEdit:focus {{ border-color: {C_RED if bad else C_BLUE}; }}"
+        )
 
     def _save(self):
-        self.result_value = ("save", self._num(self.inp_entry.text()), self._num(self.inp_exit.text()))
+        entry = self._num(self.inp_entry.text())
+        exit_ = self._num(self.inp_exit.text())
+        bad_entry = entry is self._INVALID
+        bad_exit = exit_ is self._INVALID
+        self._mark_invalid(self.inp_entry, bad_entry)
+        self._mark_invalid(self.inp_exit, bad_exit)
+        if bad_entry or bad_exit:
+            # Geçersiz sayı: accept ETME — kullanıcı hedef koyduğunu sanıp None'a
+            # düşmesin. Odağı ilk hatalı alana ver.
+            (self.inp_entry if bad_entry else self.inp_exit).setFocus()
+            return
+        self.result_value = ("save", entry, exit_)
         self.accept()
 
     def _clear(self):
         self.result_value = ("clear",)
         self.accept()
-
-
-# ── Hedef barı ──────────────────────────────────────────────────────────────
-class TargetBar(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedHeight(4)
-        self._entry = self._exit = self._price = None
-
-    def set_levels(self, entry, exit_price, price):
-        self._entry, self._exit, self._price = entry, exit_price, price
-        self.update()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(Qt.NoPen)
-        w, h = self.width(), self.height()
-        p.setBrush(QColor(255, 255, 255, 32))
-        p.drawRoundedRect(0, 0, w, h, 2, 2)
-        if self._entry is None or self._exit is None or self._price is None:
-            p.end()
-            return
-        lo, hi = min(self._entry, self._exit), max(self._entry, self._exit)
-        frac = 1.0 if hi == lo else max(0.0, min(1.0, (self._price - lo) / (hi - lo)))
-        reached = self._price >= hi
-        p.setBrush(QColor(C_YELLOW if reached else C_GREEN))
-        p.drawRoundedRect(0, 0, max(4, int(w * frac)), h, 2, 2)
-        p.end()
 
 
 # ── Satırlar ────────────────────────────────────────────────────────────────
@@ -538,17 +596,17 @@ class Sparkline(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._points = []
-        self._up = True
 
-    def restore(self, points, up):
+    def restore(self, points):
         self._points = list(points)[-self.MAX:]
-        self._up = bool(up)
         self.update()
 
-    def push(self, price, up):
-        if price is None:
+    def push(self, price):
+        # None VE NaN savunması: TV/BIST yolundan NaN fiyat sızabilir (data_fetcher
+        # yfinance yolunda math.isnan filtreler ama TV yolunda değil); NaN nokta
+        # paintEvent'te int(vy(nan)) → ValueError ile çizimi çökertir.
+        if price is None or (isinstance(price, float) and math.isnan(price)):
             return
-        self._up = bool(up)
         self._points.append(price)
         if len(self._points) > self.MAX:
             self._points = self._points[-self.MAX:]
@@ -608,7 +666,6 @@ class Sparkline(QWidget):
 class StockRow(QWidget):
     remove_requested = Signal(str)
     levels_changed   = Signal(str, object, object)
-    reorder_started  = Signal(str)
 
     def __init__(self, symbol, entry=None, exit_price=None, parent=None):
         super().__init__(parent)
@@ -685,13 +742,20 @@ class StockRow(QWidget):
         parts = []
         for iv in (5, 15, 30, 60):
             v = rsi.get(iv)
-            if v is not None:
+            # NaN savunması: _calc_rsi NaN filtreler ama dış kaynaktan NaN
+            # sızabilir; int(round(nan)) ValueError vermesin diye ele.
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
                 parts.append(f"{iv}m:{int(round(v))}")
         if not parts:
             self.lbl_rsi.setVisible(False)
             return
         # En kısa interval rengi temsil eder
-        anchor = next((rsi.get(iv) for iv in (5, 15, 30, 60) if rsi.get(iv) is not None), None)
+        anchor = next(
+            (rsi.get(iv) for iv in (5, 15, 30, 60)
+             if rsi.get(iv) is not None
+             and not (isinstance(rsi.get(iv), float) and math.isnan(rsi.get(iv)))),
+            None,
+        )
         if anchor is None:
             color = C_TEXT3
         elif anchor >= 70:
@@ -717,9 +781,15 @@ class StockRow(QWidget):
         self.dot.setVisible(has)
         self._reached = False
         if has:
-            self._reached = (
-                self._price is not None and self._price >= max(self._entry, self._exit)
-            )
+            # Yön farkındalığı: çıkış hedefi girişin ÜSTündeyse (long) fiyat
+            # hedefe ≥ ile, ALTındaysa (short) ≤ ile ulaşır. Eski 'price >=
+            # max(entry,exit)' yalnızca long'u düşünüyordu; short hedefte hiç
+            # tetiklenmez, girişin üstünde yanlışlıkla 'ulaşıldı' yanardı.
+            if self._price is not None:
+                if self._exit >= self._entry:
+                    self._reached = self._price >= self._exit
+                else:
+                    self._reached = self._price <= self._exit
             self.dot.setStyleSheet(
                 f"background: {C_YELLOW if self._reached else C_GREEN}; border-radius: 2px;"
             )
@@ -733,7 +803,7 @@ class StockRow(QWidget):
             self.setToolTip("")
         self._paint_bg()
 
-    def update_data(self, price, change_pct, volume=None, avg_volume=None):
+    def update_data(self, price, change_pct):
         self._price = price
         self.lbl_price.setText("—" if price is None else _tr(price))
         if change_pct is None:
@@ -745,7 +815,11 @@ class StockRow(QWidget):
             self.lbl_pct.setStyleSheet(
                 f"color: {C_GREEN if up else C_RED}; background: transparent;"
             )
-            self.spark.push(price, up)
+        # Sparkline'ı change_pct'ten BAĞIMSIZ, fiyat geldiğinde güncelle: TV
+        # paketinde chp None gelip price dolu olabilir ({price, change_pct:None});
+        # push'u yüzde dalına bağlamak bu sembolde grafiği kalıcı boş bırakırdı.
+        # push zaten None/NaN-guard'lı.
+        self.spark.push(price)
         self._sync_target()
 
     # sürükle-bırak ------------------------------------------------------
@@ -759,7 +833,6 @@ class StockRow(QWidget):
         if (e.position().toPoint() - self._press_pos).manhattanLength() < 8:
             return
         self._press_pos = None
-        self.reorder_started.emit(self.symbol)
         pm = self.grab()
         ghost = QPixmap(pm.size())
         ghost.fill(Qt.transparent)
@@ -937,8 +1010,16 @@ class OverlayWindow(QWidget):
     # Poll worker (arka plan thread) yeni tweet id'lerini bu sinyalle
     # ana thread'e iletir; UI/state değişikliği yalnızca ana thread'de olur.
     tw_poll_result = Signal(set)
+    # Poll HATASI (arka plan thread) → ana thread'de status/backoff. Eskiden poll
+    # hatası (rate-limit/500/ağ) sessizce yutuluyordu; kullanıcı arızayı görmezdi.
+    tw_poll_error = Signal(str)
     # İlk yükleme (arka plan thread) sonucu: (tweets, users, hata_metni)
     tw_load_result = Signal(object)
+    # RSI worker BİTTİ sinyali → _rsi_fetching bayrağını ANA thread'de kapat.
+    # (Diğer re-entrancy bayrakları _fetching/_tw_loading/_notes_loading ana
+    # thread'de kapanıyor; eskiden bu bayrak worker'ın finally'sinde cross-thread
+    # yazılıyordu — projenin kendi thread-safety kuralını kıran tek istisnaydı.)
+    rsi_done = Signal()
 
     def __init__(self, signals):
         super().__init__()
@@ -949,7 +1030,8 @@ class OverlayWindow(QWidget):
         self.rows = {}
         self.headers = {}
         self.cards = {}   # {uid: card widget} — collapse için
-        self._spark_history = {}   # {symbol: (points, up)} — rebuild'ler arası korunur
+        self._sections = []   # [(uid, section, card, [(sym,row)])] — arama görünürlüğü
+        self._spark_history = {}   # {symbol: points} — rebuild'ler arası korunur
         self._rsi_cache = {}       # {symbol: {5:x,15:x,30:x,60:x}} — rebuild'ler arası korunur
         self._collapsed_sections = {}
         self._filter = ""
@@ -961,10 +1043,15 @@ class OverlayWindow(QWidget):
         self._tw_tweets = []
         self._tw_users = {}
         self._tw_last = "—"
+        self._tw_rows = None         # [(sym, row_widget)] — _twitter_render kurar
+        self._tw_chip_widgets = []   # [(sym_or_None, chip_widget)]
         self._tw_symbols = load_tw_symbols()   # izlenen semboller (kalıcı)
 
         self._pinned = False
-        self._floating = True  # başlangıçta always-on-top aktif
+        # Varsayılan floating KAPALI: açıkken aynı sekmeye tekrar tıklama ve
+        # dışarı-tıkla-kapat devre dışı kalır, yeni kullanıcı paneli kapatamaz.
+        # Kullanıcı ⬆ butonuyla bilinçli açabilir.
+        self._floating = False
         self._pin_btns = []
         self._float_btns = []
         self._monitor_btns = []
@@ -1019,7 +1106,9 @@ class OverlayWindow(QWidget):
         self._twitter_poll_timer.timeout.connect(self._twitter_poll)
         self._twitter_poll_timer.start(60_000)
         self.tw_poll_result.connect(self._twitter_poll_apply)
+        self.tw_poll_error.connect(self._twitter_poll_error)
         self.tw_load_result.connect(self._twitter_load_apply)
+        self.rsi_done.connect(self._on_rsi_done)
 
         self._rsi_timer = QTimer(self)
         self._rsi_timer.timeout.connect(self._rsi_refresh)
@@ -1124,8 +1213,15 @@ class OverlayWindow(QWidget):
         win_h = sc_avail.height() // 2
         win_y = sc_avail.y() + sc_avail.height() - win_h
         self._current_sc = sc
-        self.setFixedSize(TAB_W, win_h)
-        self.move(sc.x() + sc.width() - TAB_W, win_y)
+        # Panel AÇIKKEN (floating modda ⊞ ile monitör değiştirmek yalnızca panel
+        # açıkken mümkün) pencereyi TAB_W'ye daraltmak paneli görünmez bırakır ve
+        # animasyon durumu (panel.maximumWidth) pencere genişliğiyle desenkronize
+        # olur. Panelin mevcut açık genişliğini (maximumWidth) koruyarak senkronu
+        # sürdür.
+        panel_w = self.panel.maximumWidth() if self._mode != 0 else 0
+        win_w = TAB_W + panel_w
+        self.setFixedSize(win_w, win_h)
+        self.move(sc.x() + sc.width() - win_w, win_y)
         if self._floating:
             _set_ns_window_level(self, level=1001, collection_behavior=_COLLECTION_BEHAVIOR)
 
@@ -1181,6 +1277,24 @@ class OverlayWindow(QWidget):
         else:
             self.tab_badge.hide()
 
+    def _control_button(self, glyph, tooltip, handler, registry, monitor=False):
+        """Başlık kontrol butonu (pin/float/monitor) üret — tek yerden.
+
+        _head_row ve _build_twitter_page aynı pin/float/monitor bloklarını
+        kopyalamak yerine bunu çağırır (DRY; bir davranış değişince tek yer).
+        """
+        b = QLabel(glyph)
+        b.setFixedSize(18, 18)
+        b.setAlignment(Qt.AlignCenter)
+        b.setFont(_f(11))
+        b.setCursor(Qt.PointingHandCursor)
+        b.setToolTip(tooltip)
+        b.mousePressEvent = lambda e: handler()
+        if monitor:
+            b.setVisible(len(QApplication.screens()) > 1)
+        registry.append(b)
+        return b
+
     def _head_row(self, title, status_text=""):
         """Kompakt sayfa başlığı: 12 px başlık + raptiye + sağda durum, altında saç çizgisi."""
         w = QWidget()
@@ -1193,33 +1307,13 @@ class OverlayWindow(QWidget):
         lbl.setFont(_f(12, QFont.DemiBold))
         lbl.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
 
-        pin_btn = QLabel("📌")
-        pin_btn.setFixedSize(18, 18)
-        pin_btn.setAlignment(Qt.AlignCenter)
-        pin_btn.setFont(_f(11))
-        pin_btn.setCursor(Qt.PointingHandCursor)
-        pin_btn.setToolTip("Sürekli açık tut")
-        pin_btn.mousePressEvent = lambda e: self._toggle_pin()
-        self._pin_btns.append(pin_btn)
-
-        float_btn = QLabel("⬆")
-        float_btn.setFixedSize(18, 18)
-        float_btn.setAlignment(Qt.AlignCenter)
-        float_btn.setFont(_f(11))
-        float_btn.setCursor(Qt.PointingHandCursor)
-        float_btn.setToolTip("Her zaman üstte / floating")
-        float_btn.mousePressEvent = lambda e: self._toggle_float()
-        self._float_btns.append(float_btn)
-
-        monitor_btn = QLabel("⊞")
-        monitor_btn.setFixedSize(18, 18)
-        monitor_btn.setAlignment(Qt.AlignCenter)
-        monitor_btn.setFont(_f(11))
-        monitor_btn.setCursor(Qt.PointingHandCursor)
-        monitor_btn.setToolTip("Diğer monitöre taşı")
-        monitor_btn.mousePressEvent = lambda e: self._cycle_monitor()
-        monitor_btn.setVisible(len(QApplication.screens()) > 1)
-        self._monitor_btns.append(monitor_btn)
+        pin_btn = self._control_button(
+            "📌", "Sürekli açık tut", self._toggle_pin, self._pin_btns)
+        float_btn = self._control_button(
+            "⬆", "Her zaman üstte / floating", self._toggle_float, self._float_btns)
+        monitor_btn = self._control_button(
+            "⊞", "Diğer monitöre taşı", self._cycle_monitor, self._monitor_btns,
+            monitor=True)
 
         status = QLabel(status_text)
         status.setFont(_f(10))
@@ -1435,12 +1529,30 @@ class OverlayWindow(QWidget):
         self.lbl_twitter_status = QLabel("")
         self.lbl_twitter_status.setFont(_f(10))
         self.lbl_twitter_status.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+
+        # Pin/float/monitor kontrolleri — Portföy/Notlar başlıklarıyla tutarlı
+        # olsun diye Twitter başlığına da eklenir (aksi halde bu sekmedeyken
+        # kullanıcı pencereyi sabitleyemez/floating yapamaz/monitör değiştiremez).
+        # _head_row ile aynı fabrikayı kullan (DRY).
+        pin_btn = self._control_button(
+            "📌", "Sürekli açık tut", self._toggle_pin, self._pin_btns)
+        float_btn = self._control_button(
+            "⬆", "Her zaman üstte / floating", self._toggle_float, self._float_btns)
+        monitor_btn = self._control_button(
+            "⊞", "Diğer monitöre taşı", self._cycle_monitor, self._monitor_btns,
+            monitor=True)
+
         h.addWidget(title)
         h.addWidget(self.lbl_tw_count)
         h.addWidget(self.lbl_twitter_status)
         h.addStretch()
         h.addWidget(self.btn_tw_read)
+        h.addWidget(pin_btn)
+        h.addWidget(float_btn)
+        h.addWidget(monitor_btn)
         pnl.addWidget(head)
+        self._update_pin_style()
+        self._update_float_style()
 
         # sembol çipleri
         self.tw_chips = QWidget()
@@ -1478,6 +1590,11 @@ class OverlayWindow(QWidget):
 
     # ── 𝕏 yardımcıları ──────────────────────────────────────────────────
     def _twitter_query(self):
+        # config.TWITTER_QUERY doluysa aynen kullan (opsiyonel override);
+        # boşsa izlenen sembollerden üret.
+        override = (config.TWITTER_QUERY or "").strip()
+        if override:
+            return override
         return twitter_query(self._tw_symbols)
 
     def _twitter_add_symbol(self):
@@ -1507,25 +1624,34 @@ class OverlayWindow(QWidget):
         self._update_tab_badge()
         self._twitter_render()
 
-    def _twitter_chip(self, label, count, active, on_click, removable=False):
-        w = QWidget()
-        w.setCursor(Qt.PointingHandCursor)
-        w.setObjectName("chip")
+    def _twitter_style_chip(self, w, active):
+        """Çip aktiflik rengini uygula (widget yeniden kurmadan güncellenebilir)."""
         bg = C_BLUE if active else "rgba(255,255,255,18)"
         fg = "#ffffff" if active else C_TEXT3
         w.setStyleSheet(
             f"#chip {{ background: {bg}; border-radius: 5px; }}"
             f"#chip:hover {{ background: {C_BLUE if active else 'rgba(255,255,255,34)'}; }}"
         )
+        lbl = getattr(w, "_chip_lbl", None)
+        cnt = getattr(w, "_chip_cnt", None)
+        if lbl is not None:
+            lbl.setStyleSheet(f"color: {fg}; background: transparent;")
+        if cnt is not None:
+            cnt.setStyleSheet(f"color: {fg if active else C_TEXT4}; background: transparent;")
+
+    def _twitter_chip(self, label, count, active, on_click, removable=False):
+        w = QWidget()
+        w.setCursor(Qt.PointingHandCursor)
+        w.setObjectName("chip")
         lay = QHBoxLayout(w)
         lay.setContentsMargins(7, 2, 7 if not removable else 3, 3)
         lay.setSpacing(4)
         lbl = QLabel(label)
         lbl.setFont(_f(10, QFont.DemiBold))
-        lbl.setStyleSheet(f"color: {fg}; background: transparent;")
         cnt = QLabel(str(count))
         cnt.setFont(_f(10))
-        cnt.setStyleSheet(f"color: {fg if active else C_TEXT4}; background: transparent;")
+        w._chip_lbl = lbl        # _twitter_style_chip yeniden renklendirebilsin
+        w._chip_cnt = cnt
         lay.addWidget(lbl)
         lay.addWidget(cnt)
         if removable:
@@ -1536,6 +1662,7 @@ class OverlayWindow(QWidget):
             x_btn.mousePressEvent = lambda e, s=label: (e.accept(), self._twitter_remove_symbol(s))
             lay.addWidget(x_btn)
         w.mousePressEvent = lambda e, cb=on_click: cb()
+        self._twitter_style_chip(w, active)
         return w
 
     def _twitter_row(self, tw, user, unread, symbol):
@@ -1627,38 +1754,77 @@ class OverlayWindow(QWidget):
         tweets = self._tw_tweets
         syms = self._tw_symbols
 
-        def sym_of(tw):
-            return symbol_of_tweet(tw.get("text", ""), syms)
+        # Tweet başına eşleşen TÜM sembolleri BİR KEZ hesapla; counts/filtre/
+        # gösterim aynı sonucu kullansın (aksi halde regex 3× çalışırdı). Çok
+        # sembollü tweet ('THYAO ve AKBNK') her ilgili sembolde sayılır/görünür.
+        syms_by_id = {}
+
+        def syms_of(tw):
+            tid = tw.get("id", "")
+            s = syms_by_id.get(tid)
+            if s is None:
+                s = symbols_of_tweet(tw.get("text", ""), syms)
+                syms_by_id[tid] = s
+            return s
 
         counts = {}
+        matched_ids = set()
         for tw in tweets:
-            s = sym_of(tw)
-            if s:
+            ms = syms_of(tw)
+            if ms:
+                matched_ids.add(tw.get("id", ""))
+            for s in ms:
                 counts[s] = counts.get(s, 0) + 1
 
-        self.tw_chips_layout.addWidget(self._twitter_chip(
+        # Çipleri sakla ki _twitter_set_filter widget yeniden kurmadan yalnızca
+        # renk/görünürlük güncelleyebilsin. [(sym_or_None, chip_widget)]
+        self._tw_chip_widgets = []
+        all_chip = self._twitter_chip(
             "Tümü", len(tweets), self._tw_filter is None,
-            lambda: self._twitter_set_filter(None)))
+            lambda: self._twitter_set_filter(None))
+        # 'Tümü' sembol çiplerinin toplamından farklı olabilir: bir tweet birden
+        # çok sembole sayılabildiğinden toplam > len(tweets) olabilir; hiçbir
+        # izlenen sembolü içermeyen tweet ise hiçbir sembol çipine düşmez. Çip
+        # sayaç toplamı yerine 'kaç tweet en az bir sembol içeriyor'u kıyasla.
+        matched = len(matched_ids)
+        if matched < len(tweets):
+            all_chip.setToolTip(
+                f"{len(tweets)} tweet'in {matched} tanesi izlenen bir sembol "
+                "içeriyor; kalanı yalnızca 'Tümü'de görünür.")
+        self.tw_chips_layout.addWidget(all_chip)
+        self._tw_chip_widgets.append((None, all_chip))
         for s in syms:
-            self.tw_chips_layout.addWidget(self._twitter_chip(
+            chip = self._twitter_chip(
                 s, counts.get(s, 0), self._tw_filter == s,
                 lambda sym=s: self._twitter_set_filter(sym),
-                removable=True))
+                removable=True)
+            self.tw_chips_layout.addWidget(chip)
+            self._tw_chip_widgets.append((s, chip))
 
-        shown = [tw for tw in tweets
-                 if self._tw_filter is None or sym_of(tw) == self._tw_filter]
-        if not shown:
-            lbl = QLabel("Gösterilecek tweet yok.")
-            lbl.setFont(_f(11))
-            lbl.setAlignment(Qt.AlignCenter)
-            lbl.setStyleSheet(f"color: {C_TEXT3}; background: transparent; padding: 18px 0;")
-            self.twitter_layout.addWidget(lbl)
-        else:
-            for tw in shown:
-                unread = tw.get("id", "") in self._tw_hl
-                user = self._tw_users.get(tw.get("author_id", ""), {})
-                self.twitter_layout.addWidget(
-                    self._twitter_row(tw, user, unread, sym_of(tw)))
+        # TÜM satırları bir kez kur ve sakla; filtre değişiminde yalnızca
+        # setVisible ile göster/gizle (hisse panelindeki _apply_visibility_filter
+        # deseni — her filtre tıklamasında ~20 satırı yeniden yaratma).
+        # Satır, eşleşen TÜM sembollerin listesiyle saklanır → çok sembollü tweet
+        # her ilgili sembol filtresinde görünür.
+        self._tw_rows = []          # [(syms_list, row_widget)]
+        for tw in tweets:
+            ms = syms_of(tw)
+            unread = tw.get("id", "") in self._tw_hl
+            user = self._tw_users.get(tw.get("author_id", ""), {})
+            # Chip etiketinde ilk eşleşen sembolü göster (satır başına tek rozet).
+            row = self._twitter_row(tw, user, unread, ms[0] if ms else "")
+            self.twitter_layout.addWidget(row)
+            self._tw_rows.append((ms, row))
+
+        # "Gösterilecek tweet yok" etiketi (filtreye göre görünürlüğü ayarlanır)
+        self._tw_empty_lbl = QLabel("Gösterilecek tweet yok.")
+        self._tw_empty_lbl.setFont(_f(11))
+        self._tw_empty_lbl.setAlignment(Qt.AlignCenter)
+        self._tw_empty_lbl.setStyleSheet(
+            f"color: {C_TEXT3}; background: transparent; padding: 18px 0;")
+        self.twitter_layout.addWidget(self._tw_empty_lbl)
+
+        self._twitter_apply_filter_visibility()
 
         n = len(self._tw_hl)
         self.lbl_tw_count.setText(str(n))
@@ -1666,9 +1832,33 @@ class OverlayWindow(QWidget):
         self.btn_tw_read.setVisible(n > 0)
         self.lbl_twitter_status.setText(f"{len(tweets)} tweet" if tweets else "")
 
+    def _twitter_apply_filter_visibility(self):
+        """Aktif filtreye göre satır görünürlüğü + çip renklerini güncelle.
+
+        Widget'ları YOK ETMEZ; yalnızca setVisible/setStyleSheet — filtre
+        tıklaması ucuz olsun (tam yeniden inşa yok).
+        """
+        shown = 0
+        for syms, row in getattr(self, "_tw_rows", []):
+            # Çok sembollü tweet her ilgili sembol filtresinde görünür.
+            visible = self._tw_filter is None or self._tw_filter in syms
+            row.setVisible(visible)
+            if visible:
+                shown += 1
+        if hasattr(self, "_tw_empty_lbl"):
+            self._tw_empty_lbl.setVisible(shown == 0)
+        # Çip aktiflik renklerini güncelle (widget yeniden kurmadan)
+        for sym, chip in getattr(self, "_tw_chip_widgets", []):
+            active = (sym == self._tw_filter) or (sym is None and self._tw_filter is None)
+            self._twitter_style_chip(chip, active)
+
     def _twitter_set_filter(self, sym):
         self._tw_filter = sym
-        self._twitter_render()
+        # Tam yeniden inşa yerine yalnızca görünürlük/renk güncelle.
+        if getattr(self, "_tw_rows", None) is not None:
+            self._twitter_apply_filter_visibility()
+        else:
+            self._twitter_render()
 
     def _twitter_load(self):
         """Sekme açılışı — ağ çağrısı arka plan thread'de, UI bloke olmaz."""
@@ -1735,10 +1925,25 @@ class OverlayWindow(QWidget):
         token = self._twitter_token()
         if not token:
             return
+        # result = (ids, err). Eskiden yalnızca err is None dalı emit ediliyordu;
+        # hata (rate-limit/500/ağ) sessizce yutuluyordu — durum güncellenmez,
+        # kullanıcı arızayı görmezdi. Artık her iki dalı da ana thread'e geçir.
         twitter_client.fetch_ids(
             self._twitter_query(),
-            lambda result: self.tw_poll_result.emit(result[0]) if result[1] is None else None,
+            lambda result: (
+                self.tw_poll_result.emit(result[0])
+                if result[1] is None
+                else self.tw_poll_error.emit(str(result[1]))
+            ),
         )
+
+    def _twitter_poll_error(self, err):
+        """Ana thread — poll hatasını kullanıcıya göster (sessiz yutma yok)."""
+        # Sekme açıkken görünür durum çubuğuna yaz; kapalıyken sadece logla
+        # (rozet zaten güncellenmedi). Backoff yok ama en azından görünür.
+        log.info("twitter poll hatası: %s", err)
+        if self._mode == 3 and hasattr(self, "lbl_tw_time"):
+            self.lbl_tw_time.setText(f"poll hatası: {err}")
 
     def _twitter_poll_apply(self, incoming):
         """Ana thread — poll sonucunu state'e uygula (thread-safe)."""
@@ -1788,13 +1993,30 @@ class OverlayWindow(QWidget):
         self._anim.setEndValue(target_w)
         self._anim.start()
 
+    def _modal_open(self):
+        """Açık bir modal/popup sheet var mı? (Hisse ekle/Hedef/Bölüm/Not başlığı)
+
+        Sheet'ler (_SheetDialog) exec() ile modal açılır ve ana panelin SOLUNDA
+        ayrı top-level pencere olurlar. 'Dışarı tıklama = kapat' mantığı bunu
+        hesaba katmazsa: sheet key window olunca ana pencere WindowDeactivate
+        alır ve panel arkadan kapanır; sheet içine tıklama da eventFilter'da
+        'panel dışı' sayılıp paneli kapatır. Sonuç: VARSAYILAN (floating kapalı)
+        durumda 'Hisse ekle' açınca panel kaybolur, eklenen hisse görünmez.
+        """
+        app = QApplication.instance()
+        return bool(app.activeModalWidget() or app.activePopupWidget())
+
     def changeEvent(self, event):
-        if event.type() == QEvent.WindowDeactivate and self._mode != 0 and not self._pinned and not self._floating:
+        if (event.type() == QEvent.WindowDeactivate and self._mode != 0
+                and not self._pinned and not self._floating
+                and not self._modal_open()):
             self._toggle(self._mode)
         super().changeEvent(event)
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.MouseButtonPress and self._mode != 0 and not self._pinned and not self._floating:
+        if (event.type() == QEvent.MouseButtonPress and self._mode != 0
+                and not self._pinned and not self._floating
+                and not self._modal_open()):
             gp = event.globalPosition().toPoint()
             if not self.geometry().contains(gp):
                 self._toggle(self._mode)
@@ -1807,7 +2029,8 @@ class OverlayWindow(QWidget):
             mask = (1 << 1) | (1 << 3)  # NSLeftMouseDown | NSRightMouseDown
 
             def handler(nsevent):
-                if self._mode == 0 or self._pinned or self._floating:
+                if (self._mode == 0 or self._pinned or self._floating
+                        or self._modal_open()):
                     return
                 loc = _NSEvent.mouseLocation()
                 sh = self._current_sc.height() + self._current_sc.y()
@@ -1822,7 +2045,8 @@ class OverlayWindow(QWidget):
             log.warning("global mouse monitor hatası: %s", e)
 
     def _check_outside_click(self):
-        if self._mode == 0 or not _APPKIT_OK or self._pinned or self._floating:
+        if (self._mode == 0 or not _APPKIT_OK or self._pinned or self._floating
+                or self._modal_open()):
             return
         try:
             buttons = _NSEvent.pressedMouseButtons()
@@ -1856,11 +2080,12 @@ class OverlayWindow(QWidget):
         for sym, row in self.rows.items():
             sp = getattr(row, "spark", None)
             if sp is not None and sp._points:
-                self._spark_history[sym] = (list(sp._points), sp._up)
+                self._spark_history[sym] = list(sp._points)
 
         self.rows.clear()
         self.headers.clear()
         self.cards.clear()
+        self._sections = []          # [(uid, section_widget, card_widget, [row's])]
         self.lbl_empty.setParent(None)
         self._clear_layout(self.rows_layout)
 
@@ -1893,36 +2118,55 @@ class OverlayWindow(QWidget):
             cv.setContentsMargins(0, 0, 0, 0)
             cv.setSpacing(0)
 
-            visible_rows = 0
+            section_rows = []
+            # TÜM satırları oluştur (filtreye bakmadan); görünürlük ayrı ele
+            # alınır. Böylece arama her tuşta widget yok edip yeniden kurmaz.
             for i, s in enumerate(items):
                 sym = s["symbol"]
-                if self._filter and self._filter not in sym.upper():
-                    continue
                 row = StockRow(sym, s.get("entry"), s.get("exit"))
                 hist = self._spark_history.get(sym)
                 if hist:
-                    row.spark.restore(hist[0], hist[1])
+                    row.spark.restore(hist)
                 rsi_cached = self._rsi_cache.get(sym)
                 if rsi_cached:
                     row.update_rsi(rsi_cached)
                 row.remove_requested.connect(self._remove_stock)
                 row.levels_changed.connect(self._update_levels)
-                row.reorder_started.connect(self._on_reorder_started)
                 cv.addWidget(row)
                 self.rows[sym] = row
                 order.append((sym, row))
-                visible_rows += 1
+                section_rows.append((sym, row))
 
-            card.setVisible(visible_rows > 0 and not collapsed)
             if uid is not None:
                 self.cards[uid] = card
             sv.addWidget(card)
-            section.setVisible(visible_rows > 0 or (uid is not None and not self._filter))
             self.rows_layout.addWidget(section)
+            self._sections.append((uid, section, card, section_rows))
 
         self.host.set_order(order)
         self.rows_layout.addWidget(self.lbl_empty)
-        self.lbl_empty.setVisible(not self.rows)
+        self._apply_visibility_filter()
+
+    def _apply_visibility_filter(self):
+        """Arama filtresi + katlama durumuna göre satır/kart görünürlüğü ayarla.
+
+        Widget'ları YOK ETMEZ; yalnızca setVisible() — arama her tuşta ucuz.
+        """
+        any_visible = False
+        for uid, section, card, section_rows in self._sections:
+            collapsed = self._collapsed_sections.get(uid, False) if uid else False
+            visible_rows = 0
+            for sym, row in section_rows:
+                match = (not self._filter) or (self._filter in sym.upper())
+                row.setVisible(match)
+                if match:
+                    visible_rows += 1
+            if visible_rows > 0:
+                any_visible = True
+            card.setVisible(visible_rows > 0 and not collapsed)
+            section.setVisible(visible_rows > 0 or (uid is not None and not self._filter))
+
+        self.lbl_empty.setVisible(not any_visible)
         self.lbl_empty.setText(
             "Eşleşme yok\nEklemek için Enter'a bas." if self._filter
             else "Takip listen boş\nSembolü yaz, listeden ekle."
@@ -1942,8 +2186,8 @@ class OverlayWindow(QWidget):
         self._search_timer.start(200)
 
     def _apply_search_filter(self):
-        self._rebuild_rows()
-        self._apply_cached_prices()
+        # Widget'lar zaten kurulu; yalnızca görünürlük değişir (ucuz).
+        self._apply_visibility_filter()
 
     def _add_from_search(self):
         sym = self.search.text().strip().upper()
@@ -2042,14 +2286,17 @@ class OverlayWindow(QWidget):
         # Kaldırılan sembolün önbelleklerini de temizle (sınırsız birikmesin).
         self._rsi_cache.pop(symbol, None)
         self._spark_history.pop(symbol, None)
+        # _last_data'yı da temizle: aksi halde aynı sembol silinip yeniden
+        # eklenince, ilk yeni fetch gelmeden _apply_cached_prices bayat (stale)
+        # fiyatı gerçek zamanlıymış gibi yeni satıra basar (rsi_cache/spark ile
+        # tutarsız temizlikti).
+        if hasattr(self, "_last_data"):
+            self._last_data.pop(symbol, None)
         if symbol in self._collapsed_sections:
             self._collapsed_sections.pop(symbol, None)
         save_stocks(self.stocks)
         self._rebuild_rows()
         self._apply_cached_prices()
-
-    def _on_reorder_started(self, symbol: str):
-        pass
 
     def _update_levels(self, symbol, entry, exit_price):
         for s in self.stocks:
@@ -2079,10 +2326,7 @@ class OverlayWindow(QWidget):
     def _apply_cached_prices(self):
         for sym, item in getattr(self, "_last_data", {}).items():
             if sym in self.rows:
-                self.rows[sym].update_data(
-                    item["price"], item["change_pct"],
-                    item.get("volume"), item.get("avg_volume")
-                )
+                self.rows[sym].update_data(item["price"], item["change_pct"])
 
     def _rsi_refresh(self):
         # Yalnızca hisse paneli açıkken RSI çek — kapalıyken boşuna WS açma.
@@ -2100,19 +2344,28 @@ class OverlayWindow(QWidget):
 
         def _fetch():
             try:
-                # Tek WS bağlantısında tüm semboller için RSI (sembol başına
-                # ayrı bağlantı yok).
-                out = fetch_tv_rsi_bulk(syms)
-            except Exception as e:
-                log.warning("RSI toplu çekim hatası: %s", e)
-                out = {}
+                try:
+                    # Tek WS bağlantısında tüm semboller için RSI (sembol başına
+                    # ayrı bağlantı yok).
+                    out = fetch_tv_rsi_bulk(syms)
+                except Exception as e:
+                    log.warning("RSI toplu çekim hatası: %s", e)
+                    out = {}
+                for s in syms:
+                    rsi = out.get(s.upper())
+                    if rsi:
+                        self._signals.rsi_signal.emit(s, rsi)
             finally:
-                self._rsi_fetching = False
-            for s in syms:
-                rsi = out.get(s.upper())
-                if rsi:
-                    self._signals.rsi_signal.emit(s, rsi)
+                # Bayrağı worker'da DEĞİL, ana thread'de kapat: rsi_done sinyali
+                # _on_rsi_done'ı ana thread'de çalıştırır (thread-safe re-entrancy).
+                # finally: emit döngüsü/başka bir yol istisna atsa bile bayrak
+                # kalıcı True kalıp gelecek RSI yenilemelerini bloke etmesin.
+                self.rsi_done.emit()
         threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_rsi_done(self):
+        """Ana thread — RSI worker bitti, re-entrancy kilidini bırak."""
+        self._rsi_fetching = False
 
     def apply_rsi(self, symbol, rsi):
         self._rsi_cache[symbol] = rsi
@@ -2137,9 +2390,19 @@ class OverlayWindow(QWidget):
         if notes is None:
             self.lbl_notes_status.setText("Bağlantı hatası")
             return
-        self._notes = notes or []
+        # Uzak içerik geldiğinde, kullanıcının 1500ms debounce içinde yazdığı
+        # bekleyen kaydı iptal ETME — aksi halde uzak liste yerel yazımı sessizce
+        # ezer. Bekleyen kayıt varsa uzak içeriği uygulama, kullanıcının yazdığını
+        # koru ve durumu bildir (veri kaybı yarışını önle).
+        if self._save_timer.isActive():
+            self.lbl_notes_status.setText("Yerel değişiklik korundu (kaydediliyor)")
+            return
+        # Gist içeriği dışarıdan (başka istemci/elle) bozulabilir; yalnızca
+        # 'title'/'body' anahtarlı dict öğeleri kabul et — dict olmayan öğe
+        # _refresh_notes_list'te AttributeError ile UI'ı çökertmesin.
+        self._notes = sanitize_notes(notes)
         self._refresh_notes_list()
-        self.lbl_notes_status.setText("Kaydedildi")
+        self.lbl_notes_status.setText("Yüklendi")
 
     def _refresh_notes_list(self):
         self.notes_list.blockSignals(True)
@@ -2159,11 +2422,10 @@ class OverlayWindow(QWidget):
         if self._current_note is not None and self._current_note < len(self._notes):
             self.notes_list.setCurrentRow(self._current_note)
         else:
-            self._current_note = None
-            self.notes_editor.setEnabled(False)
-            self.notes_editor.blockSignals(True)
-            self.notes_editor.clear()
-            self.notes_editor.blockSignals(False)
+            # İlk açılış (henüz seçim yok) veya geçersiz index: ilk notu otomatik
+            # seç ki editör boş/pasif kalmasın (kullanıcı 'notlarım nerede?' demesin).
+            self._current_note = 0
+            self.notes_list.setCurrentRow(0)
 
     def _note_selected(self, row):
         if row < 0 or row >= len(self._notes):
@@ -2184,7 +2446,12 @@ class OverlayWindow(QWidget):
     def _notes_save_now(self):
         self.lbl_notes_status.setText("Kaydediliyor…")
         def _on_saved(ok):
-            msg = "Kaydedildi" if ok else "Kaydetme hatası!"
+            if ok == "unconfigured":
+                msg = "Kurulmadı (GIST_ID/token yok)"
+            elif ok:
+                msg = "Kaydedildi"
+            else:
+                msg = "Kaydetme hatası!"
             QTimer.singleShot(0, lambda: self.lbl_notes_status.setText(msg))
         save_notes(self._notes, _on_saved)
 

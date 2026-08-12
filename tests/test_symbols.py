@@ -51,3 +51,31 @@ def test_known_no_duplicates():
 def test_specials_have_yf_and_tv():
     for sym, m in symbols.SPECIALS.items():
         assert "yf" in m and "tv" in m, sym
+
+
+def test_specials_have_nonempty_string_yf_tv():
+    # _load artık boş/tip-hatalı yf/tv değerlerini eler; kalan hepsi geçerli str
+    for sym, m in symbols.SPECIALS.items():
+        assert isinstance(m["yf"], str) and m["yf"].strip(), sym
+        assert isinstance(m["tv"], str) and m["tv"].strip(), sym
+
+
+# ── _load: bozuk symbols.json girdilerini ele ─────────────────────────────────
+def test_load_rejects_invalid_special_entries(tmp_path, monkeypatch):
+    import json
+    bad = tmp_path / "symbols.json"
+    bad.write_text(json.dumps({
+        "bist": ["THYAO", "AKBNK", 123],          # 123 (str değil) elenmeli
+        "specials": {
+            "GOOD":     {"yf": "GC=F",  "tv": "OANDA:XAUUSD"},
+            "NULL_YF":  {"yf": None,     "tv": "X:Y"},   # elenmeli
+            "EMPTY_TV": {"yf": "A=B",    "tv": "  "},     # elenmeli
+            "MISSING":  {"yf": "A=B"},                     # tv yok → elenmeli
+            "NOT_DICT": "string-değil",                    # elenmeli
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(symbols, "_PATH", str(bad))
+    bist, specials = symbols._load()
+    assert bist == ["THYAO", "AKBNK"]              # 123 elendi
+    assert set(specials.keys()) == {"GOOD"}        # yalnızca geçerli girdi
+    assert specials["GOOD"] == {"yf": "GC=F", "tv": "OANDA:XAUUSD"}

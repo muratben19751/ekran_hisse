@@ -10,7 +10,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import logic
 
-
 # ── tw_ago ────────────────────────────────────────────────────────────────────
 _NOW = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -294,3 +293,114 @@ def test_reorder_after_does_not_mutate_input():
     stocks = [{"symbol": "A"}, {"symbol": "B"}]
     logic.reorder(stocks, "B", "A", after=True)
     assert [s["symbol"] for s in stocks] == ["A", "B"]
+
+
+# ── parse_price: boşluk/kırılmaz-boşluk binlik ayracı + alt-tire reddi ────────
+@pytest.mark.parametrize("text,expected", [
+    ("1 234,50", 1234.50),      # normal boşluk binlik ayracı (TR)
+    ("1 234,50", 1234.50), # kırılmaz boşluk (U+00A0)
+    ("1 234.50", 1234.50), # dar boşluk (U+202F), US ondalık
+    ("1 234 567", 1234567.0),   # birden çok boşluk
+])
+def test_parse_price_whitespace_thousands(text, expected):
+    assert logic.parse_price(text) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("bad", ["1_000", "1_000.5", "1__2"])
+def test_parse_price_rejects_underscore(bad):
+    # Python float('1_000')==1000 sürprizini engelle
+    with pytest.raises(ValueError):
+        logic.parse_price(bad)
+
+
+# ── compute_unread: active=True dalı (sekme açık → okunmamış yok) ─────────────
+def test_compute_unread_active_suppresses_unread():
+    seen = {"a", "b"}
+    incoming = {"a", "b", "c", "d"}   # c, d yeni ama sekme açık
+    new_ids, next_seen = logic.compute_unread(incoming, seen, active=True)
+    assert new_ids == set()                     # sekme açık: hiç unread
+    assert next_seen == {"a", "b", "c", "d"}    # yine de tohumlanır
+
+
+def test_compute_unread_active_still_seeds_on_first_load():
+    new_ids, next_seen = logic.compute_unread({"x", "y"}, set(), active=True)
+    assert new_ids == set()
+    assert next_seen == {"x", "y"}
+
+
+# ── reorder: moved==target, after=True (kendine bırakma) ──────────────────────
+def test_reorder_move_onto_self_after_true():
+    stocks = [{"symbol": "A"}, {"symbol": "B"}]
+    # 'A'yı 'A' üzerine after=True ile bırak → target==moved dalı: sona ekle
+    out = logic.reorder(stocks, "A", "A", after=True)
+    assert [s["symbol"] for s in out] == ["B", "A"]
+
+
+def test_reorder_move_onto_self_after_false():
+    stocks = [{"symbol": "A"}, {"symbol": "B"}]
+    out = logic.reorder(stocks, "A", "A", after=False)
+    assert [s["symbol"] for s in out] == ["B", "A"]
+
+
+# ── sanitize_notes: bozuk Gist verisinde çökme yok ────────────────────────────
+def test_sanitize_notes_drops_non_dict_items():
+    raw = [{"title": "N1", "body": "b1"}, "bozuk-string", None, 42,
+           {"title": "N2"}]
+    out = logic.sanitize_notes(raw)
+    assert out == [
+        {"title": "N1", "body": "b1"},
+        {"title": "N2", "body": ""},   # eksik body → boş string
+    ]
+
+
+def test_sanitize_notes_coerces_non_string_fields():
+    out = logic.sanitize_notes([{"title": 123, "body": None}])
+    assert out == [{"title": "123", "body": "None"}]
+
+
+def test_sanitize_notes_non_list_returns_empty():
+    assert logic.sanitize_notes("değil-liste") == []
+    assert logic.sanitize_notes(None) == []
+
+
+# ── sanitize_stocks: elle bozulan stocks.json'da çökme yok ────────────────────
+def test_sanitize_stocks_drops_non_string_symbol():
+    # symbol int/None/eksik → group_stocks .startswith AttributeError vermesin
+    raw = [
+        {"symbol": "THYAO", "entry": 10.0, "exit": 20.0},
+        {"symbol": 123},           # int symbol → atılır
+        {"symbol": None},          # None symbol → atılır
+        {"entry": 5},              # symbol yok → atılır
+        {"symbol": "  "},          # boş/whitespace → atılır
+        "bozuk-string",            # dict değil → atılır
+        {"symbol": "AKBNK"},       # geçerli, entry/exit yok
+    ]
+    out = logic.sanitize_stocks(raw)
+    assert out == [
+        {"symbol": "THYAO", "entry": 10.0, "exit": 20.0},
+        {"symbol": "AKBNK"},
+    ]
+
+
+def test_sanitize_stocks_coerces_bad_entry_exit_to_none():
+    out = logic.sanitize_stocks([{"symbol": "X", "entry": "abc", "exit": None}])
+    assert out == [{"symbol": "X", "entry": None, "exit": None}]
+
+
+def test_sanitize_stocks_rejects_bool_entry():
+    # bool int alt-sınıfıdır; fiyat olarak True/False anlamsız → None
+    out = logic.sanitize_stocks([{"symbol": "X", "entry": True}])
+    assert out == [{"symbol": "X", "entry": None}]
+
+
+def test_sanitize_stocks_non_list_returns_empty():
+    assert logic.sanitize_stocks("değil") == []
+    assert logic.sanitize_stocks(None) == []
+
+
+def test_group_stocks_after_sanitize_no_crash():
+    # sanitize_stocks çıktısı group_stocks'u güvenle besler (AttributeError yok)
+    raw = [{"symbol": 123}, {"symbol": "THYAO"}]
+    groups = logic.group_stocks(logic.sanitize_stocks(raw))
+    syms = [s["symbol"] for _, items in groups for s in items]
+    assert syms == ["THYAO"]

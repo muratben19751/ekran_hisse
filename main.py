@@ -1,17 +1,23 @@
-import sys
-import os
-import fcntl
 import atexit
+import fcntl
+import os
+import sys
 
 # Script'in bulunduğu dizini path'e ekle; numpy çakışmasını önle
 _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.insert(0, _here)
 
-from applog import log
+import paths  # noqa: E402
+from applog import log  # noqa: E402  (path kurulumu importtan önce olmalı)
 
-# Tek instance kilidi
-_lock_file = os.path.join(_here, ".ekranhisse.lock")
+# Tek instance kilidi — kilit + tüm kalıcı veri ~/.ekranhisse altında tutulur
+# (yol politikası tek yerde: paths modülü). .app bundle Resources dizini
+# salt-okunur olabilir (/Applications, imzalı/notarize bundle veya Gatekeeper
+# App Translocation); kilidi orada açmaya çalışmak uygulamayı hiç açılamaz
+# yapardı. Kullanıcı dizini her zaman yazılabilir.
+_data_dir = paths.ensure_data_dir()
+_lock_file = paths.data_file(".ekranhisse.lock")
 try:
     _lock_fd = open(_lock_file, "w")
 except OSError as e:
@@ -35,10 +41,10 @@ atexit.register(_cleanup_lock)
 # numpy kaynak ağacı çakışmasını önle
 sys.path = [p for p in sys.path if not p.endswith(('numpy', 'numpy/core'))]
 
-from PySide6.QtCore import Signal, QObject, QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, QTimer, Signal  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from overlay import OverlayWindow, _set_ns_window_level, _COLLECTION_BEHAVIOR
+from overlay import _COLLECTION_BEHAVIOR, OverlayWindow, _set_ns_window_level  # noqa: E402
 
 
 class _AppSignals(QObject):

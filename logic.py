@@ -48,13 +48,20 @@ def tw_ago(iso, now=None):
 
 
 def parse_price(val: str) -> float:
-    """'1.234,50' / '62,30' / '62.30' / '1,234.50' → float. Bozuk girdide ValueError.
+    """'1.234,50' / '62,30' / '62.30' / '1,234.50' / '1 234,50' → float.
 
     Hem ',' hem '.' varsa: SONDAKİ ayraç ondalık kabul edilir, diğeri binlik
     ayracı sayılıp silinir (TR '1.234,50' ve US '1,234.50' ikisi de doğru).
-    inf/nan gibi sonlu olmayan değerler reddedilir.
+    Boşluk / kırılmaz boşluk (U+00A0) / dar boşluk (U+202F) binlik ayracı
+    olarak silinir ('1 234,50' → 1234.50). Python-tarzı alt tire ('1_000')
+    reddedilir. inf/nan gibi sonlu olmayan değerler reddedilir.
     """
     v = val.strip()
+    if "_" in v:                          # float('1_000')==1000 sürprizini engelle
+        raise ValueError(f"geçersiz sayı: {val!r}")
+    # Boşluk türlerini (normal, kırılmaz, dar) binlik ayracı say ve sil.
+    for ws in (" ", " ", " ", "\t"):
+        v = v.replace(ws, "")
     if ',' in v and '.' in v:
         if v.rfind(',') > v.rfind('.'):   # virgül sonda → TR biçimi
             v = v.replace('.', '').replace(',', '.')
@@ -106,20 +113,31 @@ def _sym_regex(s: str):
     return r
 
 
-def symbol_of_tweet(text: str, symbols) -> str:
-    """Tweet metninde geçen ilk izlenen sembolü döndür (kelime sınırıyla).
+def symbols_of_tweet(text: str, symbols) -> list:
+    """Tweet metninde geçen TÜM izlenen sembolleri döndür (kelime sınırıyla).
 
-    Substring yerine kelime sınırı kullanılır: 'AL' sembolü 'ALARM' içinde
-    eşleşmez, ama '$AL', 'AL ', '#AL' eşleşir. Regex'ler sembol başına
-    derlenip önbelleğe alınır (her tweet için yeniden derlenmez).
+    Bir tweet birden çok sembolden bahsedebilir ('THYAO ve AKBNK yükseldi');
+    tek sembole bağlamak chip sayaçlarını yanıltır ve tweet bir sembolün
+    filtresinde görünmez olur. Bu yüzden eşleşen sembollerin tümünü, verilen
+    'symbols' sırasında (yinelemesiz) döndürürüz.
     """
     up = text.upper()
+    out = []
     for s in symbols:
-        if not s:
+        if not s or s in out:
             continue
         if _sym_regex(s).search(up):
-            return s
-    return ""
+            out.append(s)
+    return out
+
+
+def symbol_of_tweet(text: str, symbols) -> str:
+    """Tweet metninde geçen ilk izlenen sembolü döndür (geriye dönük uyumluluk).
+
+    Yeni kod çok-sembollü doğru davranış için symbols_of_tweet kullanmalıdır.
+    """
+    matches = symbols_of_tweet(text, symbols)
+    return matches[0] if matches else ""
 
 
 def compute_unread(incoming_ids: set, seen_ids: set, active: bool):
@@ -135,6 +153,54 @@ def compute_unread(incoming_ids: set, seen_ids: set, active: bool):
         return set(), next_seen          # sekme açık: okunmamış yok
     new_ids = incoming_ids - seen_ids
     return new_ids, next_seen
+
+
+def sanitize_notes(notes):
+    """Dış kaynaktan (Gist) gelen not listesini güvenli hale getir.
+
+    Yalnızca dict öğeleri tutulur; 'title'/'body' string'e zorlanır ve eksikse
+    boş string yapılır. dict olmayan öğeler (string/None/sayı) atılır — böylece
+    UI'daki n.get('title') çağrıları AttributeError ile çökmez.
+    """
+    if not isinstance(notes, list):
+        return []
+    out = []
+    for n in notes:
+        if not isinstance(n, dict):
+            continue
+        title = n.get("title", "")
+        body = n.get("body", "")
+        out.append({
+            "title": title if isinstance(title, str) else str(title),
+            "body": body if isinstance(body, str) else str(body),
+        })
+    return out
+
+
+def sanitize_stocks(stocks):
+    """Dış kaynaktan (elle düzenlenen stocks.json) gelen listeyi güvenli hale getir.
+
+    Yalnızca dict öğeleri ve 'symbol' değeri boş-olmayan string olan kayıtlar
+    tutulur. symbol str'e zorlanır (int/None gibi değerler group_stocks/reorder
+    içindeki .startswith/== çağrılarını AttributeError ile çökertmesin). entry/exit
+    yalnızca sayı ise korunur, aksi halde None yapılır.
+    """
+    if not isinstance(stocks, list):
+        return []
+    out = []
+    for s in stocks:
+        if not isinstance(s, dict):
+            continue
+        sym = s.get("symbol")
+        if not isinstance(sym, str) or not sym.strip():
+            continue
+        rec = {"symbol": sym}
+        for k in ("entry", "exit"):
+            if k in s:
+                v = s[k]
+                rec[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        out.append(rec)
+    return out
 
 
 def group_stocks(stocks, sep=_SEP_SYMBOL):

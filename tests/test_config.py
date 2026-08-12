@@ -108,33 +108,28 @@ def test_keychain_takes_priority_over_env(tmp_path, monkeypatch):
     assert cfg_mod.get("GITHUB_TOKEN") == "kc_token"
 
 
-# ── ~/.ekranhisse/ yolu önceliği ─────────────────────────────────────────────
-def test_user_cfg_takes_priority_over_local(tmp_path, monkeypatch):
-    user_dir = tmp_path / ".ekranhisse"
-    user_dir.mkdir()
-    user_cfg = user_dir / "notes_config.env"
+# ── Sır kaynağı: yalnızca ~/.ekranhisse (proje-kökü fallback KALDIRILDI) ──────
+def test_only_user_cfg_path_is_used(tmp_path, monkeypatch):
+    """Sırlar yalnızca kullanıcı dizini env'inden okunur; kaynak dizini değil."""
+    user_cfg = tmp_path / ".ekranhisse" / "notes_config.env"
+    user_cfg.parent.mkdir()
     user_cfg.write_text("GIST_ID=user_gist\n")
-
-    local_cfg = tmp_path / "notes_config.env"
-    local_cfg.write_text("GIST_ID=local_gist\n")
 
     import config as cfg_mod
     monkeypatch.setattr(cfg_mod, "_keychain_get", lambda k: None)
-    monkeypatch.setattr(cfg_mod, "_USER_CFG", str(user_cfg))
     monkeypatch.setattr(cfg_mod, "_CFG_FILE", str(user_cfg))
     cfg_mod._ENV = cfg_mod._load_env()
 
     assert cfg_mod.get("GIST_ID") == "user_gist"
 
 
-def test_local_cfg_used_when_user_missing(tmp_path, monkeypatch):
-    local_cfg = tmp_path / "notes_config.env"
-    local_cfg.write_text("GIST_ID=local_gist\n")
-
+def test_no_project_dir_fallback(tmp_path, monkeypatch):
+    """config artık _LOCAL_CFG / _USER_CFG ayrımı taşımaz — tek _CFG_FILE."""
     import config as cfg_mod
-    monkeypatch.setattr(cfg_mod, "_keychain_get", lambda k: None)
-    monkeypatch.setattr(cfg_mod, "_USER_CFG", str(tmp_path / "yok.env"))
-    monkeypatch.setattr(cfg_mod, "_CFG_FILE", str(local_cfg))
-    cfg_mod._ENV = cfg_mod._load_env()
-
-    assert cfg_mod.get("GIST_ID") == "local_gist"
+    assert not hasattr(cfg_mod, "_LOCAL_CFG")
+    assert not hasattr(cfg_mod, "_USER_CFG")
+    # _CFG_FILE varsayılanı her zaman kullanıcı dizinine işaret eder (başka
+    # testler monkeypatch'lemiş olabileceğinden orijinal ifadeyi yeniden hesapla).
+    import os
+    assert os.path.expanduser("~/.ekranhisse/notes_config.env").endswith(
+        "/.ekranhisse/notes_config.env")

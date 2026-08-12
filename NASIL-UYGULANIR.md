@@ -9,7 +9,7 @@
 2. Bu klasördeki `overlay.py`'yi ekran_hisse klasörüne kopyala (üzerine yaz).
 3. Çalışan uygulamayı kapat (sekmeye sağ tık → Uygulamayı Kapat), sonra tekrar başlat.
 
-`main.py`, `data_fetcher.py`, `notes_api_client.py`, `notes_api.php` ve `stocks.json`
+`main.py`, `data_fetcher.py`, `notes_api_client.py` ve `stocks.json`
 **değişmedi** — dosya biçimi (symbol / entry / exit, `---:AD:sayı` ayırıcıları) aynı,
 mevcut listen olduğu gibi açılır.
 
@@ -26,10 +26,13 @@ mevcut listen olduğu gibi açılır.
 - Menlo/Arial yerine **macOS sistem yazı tipi**: başlık 15pt DemiBold, sembol 13pt DemiBold,
   fiyat 13pt, meta 11pt.
 - Yüzde değişim artık **dolgulu pill**: yeşil `#30d158` / kırmızı `#ff453a`.
-- Fiyat TR biçiminde: `₺12.847,52`.
+- Fiyat TR biçiminde: `12.847,52` (binlik nokta, ondalık virgül). Para birimi
+  simgesi gösterilmez — portföyde XAUUSD, EURUSD, XU100 gibi TL-olmayan
+  semboller de bulunabildiğinden tek bir simge doğru olmazdı.
 - Yeşil ayırıcı bar yerine **büyük harf bölüm başlığı** + chevron + adet sayacı (tıkla → katla).
-- Giriş/çıkış barı: 4px yuvarlak track + yeşil dolgu; hedef aşılınca sarı `#ffd60a` +
-  satırda **"Hedef"** rozeti.
+- Giriş/çıkış hedefi belirlenince satırın başında küçük **yeşil nokta** belirir;
+  hedef aşılınca nokta sarıya `#ffd60a` döner ve satır arka planı hafif sarı
+  tint alır. (Ayrıca fiyat/PnL bilgisi satır tooltip'inde gösterilir.)
 - Sekmeler: aktif olan mavi `#0a84ff`, ikonlar ◧ (portföy), ✎ (notlar) ve 𝕏 (tweet akışı).
 
 **Etkileşim**
@@ -42,6 +45,10 @@ mevcut listen olduğu gibi açılır.
 - Sağ tık → Hedef belirle… / Hedefi temizle / Listeden kaldır. Satırdaki `×` kalktı.
 - Notlar: kart görünümlü liste (seçili satır mavi), yuvarlak köşeli editör,
   "+ Not" / "Sil" / "↻" pill düğmeleri, durum metni Kaydedildi / Değişiklik var / Kaydediliyor…
+  - **Senkron sınırı:** Notlar tek Gist'te tutulur ve son-yazan-kazanır (last-write-wins)
+    mantığıyla kaydedilir. Aynı Gist'i **iki cihazdan** (ör. iş + ev Mac) eşzamanlı
+    düzenlerseniz biri diğerinin değişikliğini ezebilir. Çok-cihaz güvenli birleştirme
+    yoktur; tek cihazda kullanın veya cihazlar arası düzenlemeyi sıralı yapın.
 
 ## Not
 Qt penceresi macOS vibrancy (arka plan bulanıklığı) veremez; tasarımdaki blur yerine

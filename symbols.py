@@ -24,8 +24,13 @@ def _load():
     bist = [str(s).upper() for s in data.get("bist", []) if isinstance(s, str)]
     specials = {}
     for k, v in data.get("specials", {}).items():
-        if isinstance(v, dict) and "yf" in v and "tv" in v:
-            specials[k.upper()] = {"yf": v["yf"], "tv": v["tv"]}
+        # Yalnızca 'yf' ve 'tv' değerleri boş-olmayan string olan girdileri al;
+        # bozuk (null/boş/tip hatası) girdi sessizce hatalı sorguya yol açmasın.
+        if not isinstance(v, dict):
+            continue
+        yf, tv = v.get("yf"), v.get("tv")
+        if isinstance(yf, str) and yf.strip() and isinstance(tv, str) and tv.strip():
+            specials[k.upper()] = {"yf": yf.strip(), "tv": tv.strip()}
     return bist, specials
 
 

@@ -4,6 +4,16 @@ Sembol → servis eşlemeleri `symbols` modülünden (symbols.json) gelir; burad
 tekrar tutulmaz. Fiyatlar TV WS ile toplu çekilir; özel semboller (FX/altın/
 endeks/kripto) yfinance ile. RSI tek bir WS bağlantısında tüm semboller için
 toplu resolve + create_series ile alınır (sembol başına ayrı bağlantı yok).
+
+Not (bilinen optimizasyon fırsatı): fetch_tv_prices/fetch_tv_rsi_bulk her
+periyodik yenilemede (fiyat 60sn, RSI 300sn) yeni bir WS bağlantısı açıp
+kapatır; her seferinde TCP+TLS handshake + auth + session kurulumu tekrar
+ödenir. İşlevsel olarak doğru; ancak TV 'streaming' modunu destekleyen kalıcı
+tek bir bağlantı tutmak bu tekrar maliyetini düşürebilir. Şimdilik basitlik ve
+sağlamlık için istek-başı bağlantı korunuyor. Bağlantı sızıntısına karşı: her
+run_forever ping_interval/ping_timeout ile açılır ve modül genelinde soket
+zaman aşımı (_WS_SOCK_TIMEOUT) tanımlıdır; böylece yarı-açık/sessiz bir bağlantı
+handshake/recv'de sonsuza kadar bloke kalıp daemon thread'i sızdıramaz.
 """
 
 import json
@@ -12,6 +22,7 @@ import random
 import re
 import string
 import threading
+import time
 
 import websocket
 
@@ -22,14 +33,31 @@ from applog import log
 TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 TV_SESSION_ID = config.TV_SESSION_ID
 
+# WS soket zaman aşımı: yarı-açık bağlantıda recv'in sonsuza kadar bloke olup
+# run_forever thread'ini (ve soketi) sızdırmasını önler. ping_interval/timeout
+# ile birlikte, ws.close() sonrası thread'in gerçekten sonlanmasını güvenceler.
+_WS_SOCK_TIMEOUT = 12
+_WS_PING_INTERVAL = 10
+_WS_PING_TIMEOUT = 8
+websocket.setdefaulttimeout(_WS_SOCK_TIMEOUT)
+
 _tv_auth_token_cache = [None]
 _tv_auth_token_lock  = threading.Lock()
+# Negatif (başarısız) sonuç için kısa ömürlü cache: SESSION_ID dolu ama
+# disclaimer isteği/regex sürekli başarısızsa, her fiyat (60sn) ve RSI (300sn)
+# yenilemesinde 10sn timeout'lu HTTP isteğini tekrarlamak yerine bu süre boyunca
+# hızlıca 'unauthorized_user_token' dön. Başarılı token süresizce cache'lenir.
+_TV_AUTH_NEG_TTL = 60.0
+_tv_auth_neg_until = [0.0]
 
 def _get_tv_auth_token() -> str:
     with _tv_auth_token_lock:
         if _tv_auth_token_cache[0]:
             return _tv_auth_token_cache[0]
         if not TV_SESSION_ID:
+            return "unauthorized_user_token"
+        # Yakın zamanda başarısız olduysa tekrar HTTP deneme (negatif cache).
+        if time.monotonic() < _tv_auth_neg_until[0]:
             return "unauthorized_user_token"
         try:
             import requests
@@ -43,6 +71,8 @@ def _get_tv_auth_token() -> str:
                 return _tv_auth_token_cache[0]
         except Exception as e:
             log.warning("TV auth token alınamadı: %s", e)
+        # Başarısız: negatif sonucu kısa süre cache'le.
+        _tv_auth_neg_until[0] = time.monotonic() + _TV_AUTH_NEG_TTL
         return "unauthorized_user_token"
 
 
@@ -96,7 +126,16 @@ def fetch_tv_prices(symbols: list) -> dict:
                 pchp  = v.get("chp")
                 vol   = v.get("volume")
                 avg_vol = v.get("average_volume")
-                if price is not None and sym in needed:
+                # NaN savunması: TV WS 'lp'/'last_price' tatil/eksik veri/ilk
+                # resolve anında NaN döndürebilir; 'price is not None' NaN'ı
+                # geçirir (float('nan') is not None == True) ve NaN fiyat
+                # sparkline paint'inde int(vy(nan)) → ValueError ile çöker.
+                # yfinance yolundaki math.isnan koruması (aşağıda) ile simetrik.
+                price_ok = (
+                    price is not None
+                    and not (isinstance(price, float) and math.isnan(price))
+                )
+                if price_ok and sym in needed:
                     results[sym] = (price, pchp, vol, avg_vol)
                     needed.discard(sym)
                     if not needed:
@@ -117,7 +156,12 @@ def fetch_tv_prices(symbols: list) -> dict:
         on_error=on_error,
         on_close=on_close,
     )
-    t = threading.Thread(target=lambda: ws.run_forever(), daemon=True)
+    t = threading.Thread(
+        target=lambda: ws.run_forever(
+            ping_interval=_WS_PING_INTERVAL, ping_timeout=_WS_PING_TIMEOUT
+        ),
+        daemon=True,
+    )
     t.start()
     done_event.wait(timeout=15)
     ws.close()
@@ -127,9 +171,19 @@ def fetch_tv_prices(symbols: list) -> dict:
 # TV interval kodu → dakika sayısı
 _TV_INTERVALS = {5: "5", 15: "15", 30: "30", 60: "60"}
 _RSI_PERIOD = 14
+# RSI için TV'den çekilecek bar sayısı. Wilder yumuşatması bir EMA'dır ve
+# ilk basit-ortalama tohumundan sonra oturması için yeterli ısınma (warm-up)
+# barı ister. Eski _RSI_PERIOD+10 (=24) bar TV'nin kendi RSI'sinden gözle
+# görülür sapıyordu (ort. ~3 puan, uçlarda 15+). ~150 bar ile smoothing oturur
+# ve TV değerine yakınsar; tek WS isteğinde ihmal edilebilir ek maliyet.
+_RSI_WARMUP_BARS = 150
 
 
 def _calc_rsi(closes: list, period: int = 14):
+    # TV timescale_update tatil/eksik bar için NaN close döndürebilir; NaN'lar
+    # temizlenmezse gains/losses NaN olur, guard'lar (==0) NaN'ı yakalamaz ve
+    # RSI NaN döner → update_rsi'de int(round(nan)) ValueError. Baştan ele.
+    closes = [c for c in closes if isinstance(c, (int, float)) and not math.isnan(c)]
     if len(closes) < period + 1:
         return None
     gains, losses = [], []
@@ -201,7 +255,7 @@ def fetch_tv_rsi_bulk(symbols: list, intervals: list = None) -> dict:
             for iv in intervals:
                 sid = f"{slot}_{iv}"
                 ws.send(_wrap({"m": "create_series", "p": [
-                    cs, sid, sid, slot, _TV_INTERVALS[iv], _RSI_PERIOD + 10
+                    cs, sid, sid, slot, _TV_INTERVALS[iv], _RSI_WARMUP_BARS
                 ]}))
 
     def _finish(sid):
@@ -257,7 +311,9 @@ def fetch_tv_rsi_bulk(symbols: list, intervals: list = None) -> dict:
             on_message=on_message,
             on_error=lambda ws, e: (log.warning("TV RSI WS hatası: %s", e), done.set()),
             on_close=lambda ws, *_: done.set(),
-        ).run_forever(),
+        ).run_forever(
+            ping_interval=_WS_PING_INTERVAL, ping_timeout=_WS_PING_TIMEOUT
+        ),
         daemon=True
     ).start()
 
@@ -322,8 +378,17 @@ def fetch_all(symbols: list, callback) -> None:
         closes = None
         try:
             import yfinance as yf
-            df = yf.download(ticker_syms, period="2d", progress=False, auto_adjust=True)
-            closes = df["Close"].iloc[-2:] if len(df) >= 2 else None
+            # 5 gün: hafta sonu/tatilde 2 günlük pencere karışık varlıklarda
+            # (FX/futures kapalı, kripto açık) yalnızca NaN bar döndürebilir.
+            # Daha geniş pencere alıp ticker başına son iki GEÇERLİ kapanışı
+            # kullanırız (bkz. aşağıdaki dropna).
+            df = yf.download(ticker_syms, period="5d", progress=False, auto_adjust=True)
+            closes = df["Close"] if df is not None and not df.empty else None
+            # Tek ticker'da df["Close"] bir Series döner (.columns yok); tek
+            # sütunlu DataFrame'e çevir ki aşağıdaki 'ts in closes.columns' yolu
+            # her iki durumda da çalışsın.
+            if closes is not None and getattr(closes, "ndim", 2) == 1:
+                closes = closes.to_frame(name=ticker_syms[0])
         except Exception as e:
             log.warning("yfinance özel sembol çekimi hatası: %s", e)
             closes = None
@@ -332,8 +397,13 @@ def fetch_all(symbols: list, callback) -> None:
                 ts = sym_universe.yf_ticker(s)
                 try:
                     if closes is not None and ts in closes.columns:
-                        prev_p = float(closes[ts].iloc[-2])
-                        price  = float(closes[ts].iloc[-1])
+                        # NaN barları at, son iki GEÇERLİ kapanışı al.
+                        col = closes[ts].dropna()
+                        if len(col) >= 2:
+                            prev_p = float(col.iloc[-2])
+                            price  = float(col.iloc[-1])
+                        else:
+                            prev_p = price = float("nan")
                         if math.isnan(price) or math.isnan(prev_p) or prev_p == 0:
                             results[s] = {"symbol": s, "price": None, "change_pct": None}
                         else:

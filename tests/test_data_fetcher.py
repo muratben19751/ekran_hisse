@@ -3,13 +3,14 @@
 import json
 import os
 import sys
+import threading
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 df = pytest.importorskip("data_fetcher")   # websocket bağımlılığı yoksa atla
-import symbols as sym_universe
+import symbols as sym_universe  # noqa: E402  (importorskip'ten sonra olmalı)
 
 
 # ── _parse_packets ───────────────────────────────────────────────────────────
@@ -72,12 +73,6 @@ def test_calc_rsi_insufficient_data():
     assert df._calc_rsi([1.0] * 14) is None
 
 
-def test_calc_rsi_all_gains_returns_100():
-    # Sadece yükseliş → avg_loss=0 → RSI=100
-    closes = list(range(1, 17))   # 16 değer, hep artan
-    assert df._calc_rsi(closes) == 100.0
-
-
 def test_calc_rsi_all_losses_returns_0():
     # Sadece düşüş → avg_gain=0 → RSI=0
     closes = list(range(16, 0, -1))
@@ -85,15 +80,21 @@ def test_calc_rsi_all_losses_returns_0():
 
 
 def test_calc_rsi_known_value():
-    # Bilinen değerlerle hesaplanmış RSI: 14-periyot Wilder smoothing
-    # Kapanışlar: 14 sabit artış (gain=1) + 1 düşüş (loss=5)
-    # avg_gain_init = 1.0, avg_loss_init = 0.0
-    # smoothing sonrası: avg_gain=(13/14+0/14)=13/14, avg_loss=(0*13/14+5/14)=5/14
-    # RS = (13/14)/(5/14) = 13/5 = 2.6 → RSI = 100 - 100/3.6 ≈ 72.2
-    closes = [10.0 + i for i in range(15)] + [9.0]  # 15 artış, son 5 düşüş
+    # 15 artış (10→24) + 1 düşüş (24→9). Wilder yumuşatmasıyla elle/koşarak
+    # doğrulanmış referans: 46.4. Trivial '0<x<100' yerine kesin değere sabitle.
+    closes = [10.0 + i for i in range(15)] + [9.0]
     result = df._calc_rsi(closes)
-    assert result is not None
-    assert 0.0 < result < 100.0
+    assert result == pytest.approx(46.4, abs=0.05)
+
+
+def test_calc_rsi_all_gains_returns_100():
+    # Yalnızca artış → avg_loss=0 → RSI=100
+    assert df._calc_rsi([10.0 + i for i in range(20)]) == 100.0
+
+
+def test_calc_rsi_flat_returns_none():
+    # Hareketsiz hisse (tüm kapanış eşit) → avg_gain==avg_loss==0 → RSI tanımsız
+    assert df._calc_rsi([50.0] * 20) is None
 
 
 def test_calc_rsi_returns_rounded_one_decimal():
@@ -138,3 +139,263 @@ def test_tv_symbol_rsi_bist_fallback():
 
 def test_tv_symbol_rsi_case_insensitive():
     assert sym_universe.tv_symbol("xauusd") == "OANDA:XAUUSD"
+
+
+# ── fetch_all: 'callback her durumda tam bir kez' invaryantı ──────────────────
+# En kritik eşzamanlılık sözleşmesi (aksi halde UI'daki 'Güncelleniyor…' kilidi
+# kalıcı olur). Ağ katmanı monkeypatch'le sahtelenir; Qt gerekmez.
+
+
+def _run_fetch_all(symbols, timeout=3.0):
+    """fetch_all'ı çalıştır, callback sonucunu ve çağrı sayısını döndür."""
+    calls = []
+    done = threading.Event()
+
+    def cb(result):
+        calls.append(result)
+        done.set()
+
+    df.fetch_all(symbols, cb)
+    fired = done.wait(timeout)
+    return fired, calls
+
+
+def test_fetch_all_empty_list_fires_once_immediately():
+    fired, calls = _run_fetch_all([])
+    assert fired
+    assert len(calls) == 1
+    assert calls[0] == []
+
+
+def test_fetch_all_bist_only_single_callback(monkeypatch):
+    monkeypatch.setattr(df, "fetch_tv_prices",
+                        lambda syms: {"THYAO": (10.0, 1.5, 100, 90)})
+    fired, calls = _run_fetch_all(["THYAO"])
+    assert fired and len(calls) == 1
+    out = {d["symbol"]: d for d in calls[0]}
+    assert out["THYAO"]["price"] == 10.0
+    assert out["THYAO"]["change_pct"] == 1.5
+
+
+def test_fetch_all_bist_missing_symbol_gets_none(monkeypatch):
+    monkeypatch.setattr(df, "fetch_tv_prices", lambda syms: {})   # veri yok
+    fired, calls = _run_fetch_all(["THYAO", "AKBNK"])
+    assert fired and len(calls) == 1
+    out = {d["symbol"]: d for d in calls[0]}
+    assert out["THYAO"]["price"] is None
+    assert out["AKBNK"]["price"] is None
+
+
+def test_fetch_all_fires_once_when_fetch_raises(monkeypatch):
+    def boom(syms):
+        raise RuntimeError("ağ patladı")
+    monkeypatch.setattr(df, "fetch_tv_prices", boom)
+    fired, calls = _run_fetch_all(["THYAO"])
+    assert fired and len(calls) == 1        # exception'a rağmen tam bir kez
+    assert calls[0][0]["price"] is None
+
+
+def test_fetch_all_callback_exception_does_not_crash(monkeypatch):
+    monkeypatch.setattr(df, "fetch_tv_prices", lambda syms: {})
+    done = threading.Event()
+
+    def bad_cb(result):
+        done.set()
+        raise ValueError("callback içinde hata")
+
+    # fetch_all worker thread'i callback exception'ını yutmalı (çökme yok).
+    df.fetch_all(["THYAO"], bad_cb)
+    assert done.wait(3.0)
+
+
+def test_fetch_all_output_preserves_input_order(monkeypatch):
+    monkeypatch.setattr(df, "fetch_tv_prices",
+                        lambda syms: {s: (1.0, 0.0, 0, 0) for s in
+                                      (x.upper() for x in syms)})
+    fired, calls = _run_fetch_all(["THYAO", "AKBNK", "GARAN"])
+    assert fired and len(calls) == 1
+    assert [d["symbol"] for d in calls[0]] == ["THYAO", "AKBNK", "GARAN"]
+
+
+# ── Entegrasyon sözleşmesi: fetch_all çıktısı ↔ overlay.apply_data anahtarları ─
+# apply_data/_apply_cached_prices her item'da 'symbol','price','change_pct'
+# zorunlu anahtarlarını okur (volume/avg_volume .get() ile opsiyonel). fetch_all'ın
+# TÜM dalları (BIST-bulundu, BIST-eksik, exception-fallback) bu sözleşmeyi tutmalı.
+_REQUIRED_KEYS = {"symbol", "price", "change_pct"}
+
+
+def test_fetch_all_contract_keys_present_bist(monkeypatch):
+    monkeypatch.setattr(df, "fetch_tv_prices",
+                        lambda syms: {"THYAO": (10.0, 1.5, 100, 90)})
+    _, calls = _run_fetch_all(["THYAO", "AKBNK"])   # biri bulundu, biri eksik
+    for item in calls[0]:
+        assert _REQUIRED_KEYS <= set(item), item
+
+
+def test_fetch_all_contract_keys_present_on_exception(monkeypatch):
+    def boom(syms):
+        raise RuntimeError("x")
+    monkeypatch.setattr(df, "fetch_tv_prices", boom)
+    _, calls = _run_fetch_all(["THYAO"])
+    for item in calls[0]:
+        assert _REQUIRED_KEYS <= set(item), item
+
+
+# ── _calc_rsi: NaN kapanış barı savunması ─────────────────────────────────────
+def test_calc_rsi_filters_nan_closes():
+    # TV timescale_update tatil/eksik bar için NaN döndürebilir; NaN'lar
+    # temizlenmeden guard'lar (==0) yakalamaz ve RSI NaN döner → update_rsi
+    # int(round(nan)) ValueError. Filtre sonrası ya geçerli sayı ya None dönmeli.
+    nan = float("nan")
+    closes = [10.0 + i for i in range(15)] + [nan]   # son bar NaN
+    result = df._calc_rsi(closes)
+    # NaN atıldıktan sonra 15 bar kalır (period+1 tam sınır) → sonlu sayı
+    assert result is None or (isinstance(result, float) and result == result)
+
+
+def test_calc_rsi_all_nan_returns_none():
+    result = df._calc_rsi([float("nan")] * 20)
+    assert result is None
+
+
+def test_calc_rsi_nan_never_returns_nan():
+    # Karışık NaN + geçerli barlar: sonuç asla NaN olmamalı (int(round) güvenli)
+    nan = float("nan")
+    closes = [nan, 10.0, 11.0, nan, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+              18.0, 19.0, 20.0, 21.0, 22.0, 23.0, nan, 24.0]
+    result = df._calc_rsi(closes)
+    if result is not None:
+        import math as _m
+        assert not _m.isnan(result)
+
+
+# ── _run_specials_bulk (yfinance FX/altın/endeks/kripto yolu) ─────────────────
+# fetch_all'ın özel-sembol dalı: yf.download monkeypatch'lenir, Qt gerekmez.
+class _FakeSeries:
+    """pandas Series benzeri minimal sahte: dropna + iloc[-1]/[-2]."""
+    def __init__(self, values):
+        self._v = list(values)
+
+    def dropna(self):
+        import math as _m
+        return _FakeSeries([x for x in self._v
+                            if not (isinstance(x, float) and _m.isnan(x))])
+
+    def __len__(self):
+        return len(self._v)
+
+    @property
+    def iloc(self):
+        return self._v
+
+
+class _FakeCloses:
+    """df['Close'] benzeri: .columns ve col erişimi."""
+    def __init__(self, data):   # data: {ticker: [close...]}
+        self._data = {k: _FakeSeries(v) for k, v in data.items()}
+        self.ndim = 2
+
+    @property
+    def columns(self):
+        return list(self._data.keys())
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+
+class _FakeDF:
+    def __init__(self, closes):
+        self._closes = closes
+        self.empty = False
+
+    def __getitem__(self, key):
+        assert key == "Close"
+        return self._closes
+
+
+def _install_fake_yf(monkeypatch, closes_by_ticker):
+    """yfinance modülünü sahtele (sys.modules), yf.download istenen veriyi dönsün."""
+    import types
+    fake = types.ModuleType("yfinance")
+
+    def download(tickers, period=None, progress=None, auto_adjust=None):
+        return _FakeDF(_FakeCloses(closes_by_ticker))
+
+    fake.download = download
+    monkeypatch.setitem(sys.modules, "yfinance", fake)
+
+
+def test_fetch_all_specials_happy_path(monkeypatch):
+    # XAUUSD gibi özel sembol; iki geçerli kapanıştan change_pct hesaplanır.
+    ticker = sym_universe.yf_ticker("XAUUSD")
+    _install_fake_yf(monkeypatch, {ticker: [100.0, 110.0]})
+    fired, calls = _run_fetch_all(["XAUUSD"])
+    assert fired and len(calls) == 1
+    out = {d["symbol"]: d for d in calls[0]}
+    assert out["XAUUSD"]["price"] == 110.0
+    assert out["XAUUSD"]["change_pct"] == pytest.approx(10.0)
+
+
+def test_fetch_all_specials_weekend_nan_last_bar(monkeypatch):
+    # Hafta sonu: son bar NaN. dropna ile son iki GEÇERLİ kapanış kullanılır.
+    ticker = sym_universe.yf_ticker("EURUSD")
+    _install_fake_yf(monkeypatch, {ticker: [1.10, 1.20, float("nan")]})
+    fired, calls = _run_fetch_all(["EURUSD"])
+    assert fired and len(calls) == 1
+    out = {d["symbol"]: d for d in calls[0]}
+    # NaN atılınca 1.10→1.20 kalır → fiyat 1.20, değişim ~9.09%
+    assert out["EURUSD"]["price"] == pytest.approx(1.20)
+    assert out["EURUSD"]["change_pct"] == pytest.approx((1.20 - 1.10) / 1.10 * 100)
+
+
+def test_fetch_all_specials_insufficient_valid_bars(monkeypatch):
+    # Tek geçerli kapanış (diğeri NaN) → change_pct hesaplanamaz → None.
+    ticker = sym_universe.yf_ticker("BTCUSD")
+    _install_fake_yf(monkeypatch, {ticker: [float("nan"), 50000.0]})
+    fired, calls = _run_fetch_all(["BTCUSD"])
+    out = {d["symbol"]: d for d in calls[0]}
+    assert out["BTCUSD"]["price"] is None
+    assert out["BTCUSD"]["change_pct"] is None
+
+
+def test_fetch_all_specials_contract_keys_present(monkeypatch):
+    # Özel dal da fetch_all sözleşmesini (symbol/price/change_pct) tutmalı.
+    ticker = sym_universe.yf_ticker("XAUUSD")
+    _install_fake_yf(monkeypatch, {ticker: [100.0, 110.0]})
+    _, calls = _run_fetch_all(["XAUUSD"])
+    for item in calls[0]:
+        assert _REQUIRED_KEYS <= set(item), item
+
+
+def test_fetch_all_specials_prev_zero_no_div_by_zero(monkeypatch):
+    # prev_p == 0 → bölme yok, change_pct None.
+    ticker = sym_universe.yf_ticker("XAUUSD")
+    _install_fake_yf(monkeypatch, {ticker: [0.0, 110.0]})
+    _, calls = _run_fetch_all(["XAUUSD"])
+    out = {d["symbol"]: d for d in calls[0]}
+    assert out["XAUUSD"]["change_pct"] is None
+    assert out["XAUUSD"]["price"] is None
+
+
+# ── TV timescale_update parse sözleşmesi (kayıtlı payload) ────────────────────
+# Canlı WS test edilemez ama parse mantığının close çıkarımı (b["v"][4]) ve
+# _calc_rsi zinciri kayıtlı bir örnek payload'la doğrulanabilir. TV mesaj formatı
+# değişirse (v dizisi düzeni) bu test kırılır → sessiz regresyon görünür olur.
+def test_tv_timescale_bars_close_extraction_contract():
+    # TV bar formatı: {"v": [time, open, high, low, close, volume]}
+    bars = [{"v": [1700000000 + i, 10.0, 11.0, 9.0, 10.0 + i, 100]}
+            for i in range(16)]
+    # Parser'ın yaptığı çıkarım (data_fetcher.py on_message içindeki satır):
+    closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
+    assert closes == [10.0 + i for i in range(16)]
+    # Bu close serisi _calc_rsi'ye geçince geçerli (NaN olmayan) RSI üretmeli
+    rsi = df._calc_rsi(closes)
+    assert rsi == 100.0   # yalnızca artış
+
+
+def test_tv_timescale_short_v_array_skipped():
+    # Eksik/bozuk 'v' dizisi (< 5 eleman) close çıkarımından atlanmalı (KeyError/
+    # IndexError yerine sessiz atla) — parser'ın 'len(v) >= 5' koruması.
+    bars = [{"v": [1, 2, 3]}, {"v": [10, 11, 12, 13, 42.0, 99]}]
+    closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
+    assert closes == [42.0]

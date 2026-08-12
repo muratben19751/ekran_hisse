@@ -8,6 +8,13 @@ notes_data.json
 # Tek-instance kilidi ve kullanıcı verisi
 .ekranhisse.lock
 tw_symbols.json
+# Portföy kullanıcı verisidir; kaynak ağacına ve bundle'a girmez.
+stocks.json
+EkranHisse.app/Contents/Resources/stocks.json
+
+# Kaldırılan PHP backend artıkları (Gist tabanlı mimariye geçildi)
+notes_api.php
+test.php
 
 # Tasarım paketleri ve alakasız dosyalar
 *.zip

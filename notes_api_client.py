@@ -1,6 +1,6 @@
+import json
 import threading
 import urllib.request
-import json
 
 import config
 from applog import log
@@ -18,8 +18,12 @@ def is_configured() -> bool:
 
 
 def _gist_api():
-    if not GIST_ID:
-        raise NotConfigured("GIST_ID yapılandırılmamış — notes_config.env / Keychain kontrol edin")
+    # Hem GIST_ID hem GITHUB_TOKEN gerekir: yalnızca GIST_ID kontrol edilirse
+    # token boşken istek 'Authorization: token ' ile gidip 401 döner ve UI'da
+    # 'Kurulmadı' yerine yanıltıcı 'Bağlantı hatası' gösterilir.
+    if not GIST_ID or not GITHUB_TOKEN:
+        raise NotConfigured(
+            "GIST_ID/GITHUB_TOKEN yapılandırılmamış — notes_config.env / Keychain kontrol edin")
     return f"https://api.github.com/gists/{GIST_ID}"
 
 _save_lock   = threading.Lock()
@@ -54,7 +58,16 @@ def fetch_notes(callback):
 
 
 def save_notes(notes, callback=None):
-    """En son payload'ı gönderir; uçuşta istek varsa beklemez, yenisiyle ezer."""
+    """En son payload'ı gönderir; uçuşta istek varsa beklemez, yenisiyle ezer.
+
+    KAPSAM/SINIR: Bu, tek kullanıcı-tek cihaz için tasarlanmıştır. Gist tüm
+    notes.json'u ETag/If-Match olmadan PATCH ile komple değiştirir (last-write-
+    wins). İki cihaz (ör. iş + ev Mac) AYNI Gist'i kullanırsa, biri diğerinin
+    henüz fetch etmediği değişikliği sessizce ezebilir. Çok-cihaz güvenli merge
+    (ETag ile optimistic-concurrency veya CRDT) kapsam dışıdır; kullanıcı
+    dokümanında (NASIL-UYGULANIR.md) bu sınır belirtilir. apply_notes'taki
+    _save_timer koruması yalnızca AYNI cihazdaki yerel debounce yarışını çözer.
+    """
     global _pending, _save_thread
     with _save_lock:
         _pending = (notes, callback)
@@ -85,6 +98,11 @@ def _save_worker():
                 resp.read()
             if callback:
                 callback(True)
+        except NotConfigured as e:
+            # Kurulum tamamlanmamış — gürültülü hata loglama yok, UI'a sessiz sinyal.
+            log.info("notes save atlandı: %s", e)
+            if callback:
+                callback("unconfigured")
         except Exception as e:
             log.warning("notes save hatası: %s", e)
             if callback:

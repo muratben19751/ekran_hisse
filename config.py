@@ -3,21 +3,23 @@
 Sır arama sırası (her anahtar için ayrı ayrı):
   1. macOS Keychain  (güvenli — önerilen)
        security add-generic-password -s ekranhisse -a GITHUB_TOKEN -w '<token>'
-  2. ~/.ekranhisse/notes_config.env  (kullanıcı dizini — düz metin)
-  3. <proje dizini>/notes_config.env (eski konum — geriye dönük uyumluluk)
+  2. ~/.ekranhisse/notes_config.env  (kullanıcı dizini — düz metin, geçiş)
 
 Sırlar env dosyasında düz metin bulunursa bir kez uyarı loglanır; token'lar
-Keychain'e taşınmalıdır (bkz. NASIL-UYGULANIR.md).
+Keychain'e taşınmalıdır (bkz. NASIL-UYGULANIR.md). Proje/kaynak dizinindeki
+düz metin sır dosyası artık DESTEKLENMEZ — sırlar kaynak ağacına yazılmamalı.
 """
 
 import os
 import subprocess
 
+import paths
 from applog import log
 
-_USER_CFG  = os.path.expanduser("~/.ekranhisse/notes_config.env")
-_LOCAL_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes_config.env")
-_CFG_FILE  = _USER_CFG if os.path.exists(_USER_CFG) else _LOCAL_CFG
+# Sırlar yalnızca kullanıcı dizininde (~/.ekranhisse) düz metin okunabilir;
+# proje/kaynak dizini fallback'i güvenlik nedeniyle kaldırıldı. Yol politikası
+# tek yerde: paths modülü.
+_CFG_FILE = paths.data_file("notes_config.env")
 
 _KEYCHAIN_SERVICE = "ekranhisse"
 # Bu anahtarlar sırdır; env'de düz metin görülürse uyarı verilir.
@@ -82,6 +84,11 @@ GIST_ID              = get("GIST_ID")
 GITHUB_TOKEN         = get("GITHUB_TOKEN")
 TWITTER_BEARER_TOKEN = get("TWITTER_BEARER_TOKEN")
 TV_SESSION_ID        = get("TV_SESSION_ID")
-# notes_config.env'de tanımlıydı ama okunmuyordu; artık opsiyonel override.
-# Boşsa logic.twitter_query() sembollerden üretir.
+# Opsiyonel override: doluysa overlay._twitter_query() bunu aynen kullanır,
+# boşsa logic.twitter_query() izlenen sembollerden üretir.
 TWITTER_QUERY        = get("TWITTER_QUERY")
+
+# Not: Bu sabitler import anında bir kez okunur. Uygulama açıkken Keychain'e/env'e
+# sır eklenirse, süreç yeniden başlatılana kadar görülmez (notes_api_client ve
+# data_fetcher de kendi module-level snapshot'larını alır). Kurulumu uygulama
+# çalışmadan tamamlamak veya kurulum sonrası uygulamayı yeniden başlatmak gerekir.

@@ -1,0 +1,6 @@
+# EkranHisse — geliştirme/test bağımlılıkları (runtime için requirements.txt).
+# Kur: python3 -m pip install -r dev-requirements.txt
+-r requirements.txt
+pytest>=7.0
+ruff>=0.4
+pyflakes>=3.0

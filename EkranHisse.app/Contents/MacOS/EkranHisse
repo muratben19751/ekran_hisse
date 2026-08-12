@@ -10,4 +10,10 @@ LOG="$HOME/Library/Logs/EkranHisse.log"
 pkill -f "$RESOURCES/main.py" 2>/dev/null
 
 cd "$RESOURCES"
-exec arch -arm64 /usr/bin/python3 -W ignore "$RESOURCES/main.py" >> "$LOG" 2>&1
+# Apple Silicon'da arm64 mimarisini zorla (Rosetta karışıklığını önler); Intel
+# Mac'te 'arch -arm64' çalışmayacağı için mimariyi algılayıp koşullu seçeriz.
+if [ "$(uname -m)" = "arm64" ]; then
+    exec arch -arm64 /usr/bin/python3 -W ignore "$RESOURCES/main.py" >> "$LOG" 2>&1
+else
+    exec /usr/bin/python3 -W ignore "$RESOURCES/main.py" >> "$LOG" 2>&1
+fi

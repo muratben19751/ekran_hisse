@@ -1,0 +1,18 @@
+[tool.ruff]
+# EkranHisse — statik analiz yapılandırması.
+# Çalıştır: ruff check .   (dev-requirements.txt ile kurulur)
+line-length = 100
+target-version = "py39"
+exclude = ["EkranHisse.app", ".venv", "ekran_hisse_wiki"]
+
+[tool.ruff.lint]
+# F = pyflakes (kullanılmayan import/isim/değişken), E/W = pycodestyle,
+# I = isort. pyflakes'in dar kümesinin ötesinde ölü kod/atama da yakalanır.
+select = ["F", "E", "W", "I"]
+ignore = [
+    "E501",  # satır uzunluğu (line-length ile ayrı yönetiliyor)
+    "E741",  # namespace'te tek harfli değişken (l, I) — mevcut kodda var
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

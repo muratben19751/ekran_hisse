@@ -17,7 +17,7 @@ echo "Proje dizini: $PROJ_DIR"
 echo "Uygulama dosyaları bundle'a kopyalanıyor..."
 RES_DIR="$APP_PATH/Contents/Resources"
 mkdir -p "$RES_DIR"
-for f in main.py overlay.py logic.py data_fetcher.py config.py \
+for f in main.py overlay.py logic.py data_fetcher.py config.py paths.py \
          notes_api_client.py twitter_client.py applog.py symbols.py symbols.json; do
     cp "$PROJ_DIR/$f" "$RES_DIR/$f"
 done

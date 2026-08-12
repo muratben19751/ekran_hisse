@@ -19,10 +19,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # ── 1. Python kontrolü ──────────────────────────────────────────────────
-echo "[ 1/4 ] Python kontrol ediliyor..."
-if ! command -v python3 &>/dev/null; then
-# ── 1. Python kontrolü ──────────────────────────────────────────────────
-echo "[ 1/4 ] Python kontrol ediliyor..."
+echo "[ 1/6 ] Python kontrol ediliyor..."
 # Launcher (EkranHisse.app) özellikle /usr/bin/python3 ile başlatır; bağımlılıkları
 # DA aynı yorumlayıcıya kurmalıyız yoksa "No module named 'PySide6'" alınır.
 PY="/usr/bin/python3"
@@ -38,9 +35,26 @@ fi
 PY_VER=$("$PY" --version 2>&1)
 echo "  ✓ $PY_VER  ($PY)"
 
-# ── 2. Bağımlılıklar ────────────────────────────────────────────────────
+# ── 2. Kaynağı bundle'a senkronla ────────────────────────────────────────
+# Launcher, kodu bundle'ın Contents/Resources kopyalarından çalıştırır. Kaynak
+# tek yerdedir (proje kökü); güncellemelerin/güvenlik düzeltmelerinin çalışan
+# koda yansıması için kopyaları HER kurulumda kaynaktan yenilemeliyiz. Aksi
+# halde bundle kaynaktan geride kalır (drift) ve kullanıcı eski kodu çalıştırır.
 echo ""
-echo "[ 2/5 ] Bağımlılıklar kuruluyor..."
+echo "[ 2/6 ] Uygulama dosyaları bundle'a senkronlanıyor..."
+RES_DIR="$APP_PATH/Contents/Resources"
+mkdir -p "$RES_DIR"
+for f in main.py overlay.py logic.py data_fetcher.py config.py paths.py \
+         notes_api_client.py twitter_client.py applog.py symbols.py symbols.json; do
+    if [ -f "$PROJ_DIR/$f" ]; then
+        cp "$PROJ_DIR/$f" "$RES_DIR/$f"
+    fi
+done
+echo "  ✓ Bundle kaynakla senkron"
+
+# ── 3. Bağımlılıklar ────────────────────────────────────────────────────
+echo ""
+echo "[ 3/6 ] Bağımlılıklar kuruluyor..."
 echo "  (PySide6, yfinance, websocket-client, requests, pyobjc — ilk kurulumda birkaç dakika sürebilir)"
 echo ""
 
@@ -54,36 +68,41 @@ if [ $? -ne 0 ]; then
 fi
 echo "  ✓ Tüm bağımlılıklar kuruldu"
 
-# ── 3. Yapılandırma dosyası ──────────────────────────────────────────────
+# ── 4. Yapılandırma dosyası ──────────────────────────────────────────────
 echo ""
-echo "[ 3/5 ] Yapılandırma kontrol ediliyor..."
-CFG_DIR="$HOME/.ekranhisse"
-CFG_FILE="$CFG_DIR/notes_config.env"
-LOCAL_CFG="$PROJ_DIR/notes_config.env"
-
-mkdir -p "$CFG_DIR"
-if [ ! -f "$CFG_FILE" ]; then
-    if [ -f "$LOCAL_CFG" ]; then
-        cp "$LOCAL_CFG" "$CFG_FILE"
-        echo "  ✓ notes_config.env → $CFG_FILE konumuna kopyalandı"
-    else
-        echo "  ⚠  notes_config.env bulunamadı."
-        echo "     GIST_ID, GITHUB_TOKEN vb. değerlerinizi şuraya ekleyin:"
-        echo "     $CFG_FILE"
-        cat > "$CFG_FILE" << 'ENVEOF'
-GIST_ID=
-GITHUB_TOKEN=
-TWITTER_BEARER_TOKEN=
-TV_SESSION_ID=
-ENVEOF
-    fi
+echo "[ 4/6 ] Yapılandırma kontrol ediliyor..."
+# Sırlar (GIST_ID, GITHUB_TOKEN, TWITTER_BEARER_TOKEN, TV_SESSION_ID) macOS
+# Keychain'de güvenli tutulur. Düz metin dosya artık üretilmez.
+#
+# ÖNEMLİ: config sabitleri uygulama import edilirken BİR KEZ okunur (snapshot);
+# uygulama sırlar eklenmeden başlatılırsa, sonradan Keychain'e sır eklense bile
+# süreç yeniden başlatılana kadar görülmez. Bu yüzden sır yoksa uygulamayı
+# OTOMATİK başlatmayız — kullanıcı sırları ekledikten sonra başlatırız.
+KC_SERVICE="ekranhisse"
+if security find-generic-password -s "$KC_SERVICE" -a GITHUB_TOKEN -w >/dev/null 2>&1; then
+    echo "  ✓ Sırlar Keychain'de mevcut ($KC_SERVICE)"
 else
-    echo "  ✓ Yapılandırma zaten mevcut: $CFG_FILE"
+    echo "  ⚠  Sırlar Keychain'de bulunamadı. Notlar/Twitter/RSI özellikleri için"
+    echo "     aşağıdaki komutları ŞİMDİ (başka bir Terminal sekmesinde) çalıştırın:"
+    echo "       security add-generic-password -U -s $KC_SERVICE -a GIST_ID -w '<gist-id>'"
+    echo "       security add-generic-password -U -s $KC_SERVICE -a GITHUB_TOKEN -w '<ghp_token>'"
+    echo "       security add-generic-password -U -s $KC_SERVICE -a TWITTER_BEARER_TOKEN -w '<bearer>'"
+    echo "       security add-generic-password -U -s $KC_SERVICE -a TV_SESSION_ID -w '<tv-session>'"
+    echo ""
+    echo "     Sırları eklemeden devam ederseniz uygulama sırsız (yalnızca fiyat)"
+    echo "     başlar; sır eklemek için sonradan uygulamayı yeniden başlatmanız gerekir."
+    read -p "  Sırları ekledikten sonra Enter'a basın (veya sırsız devam için de Enter)... "
+    # Yeniden kontrol et: kullanıcı bu arada eklediyse otomatik başlatmayı sürdür.
+    if security find-generic-password -s "$KC_SERVICE" -a GITHUB_TOKEN -w >/dev/null 2>&1; then
+        echo "  ✓ Sırlar artık Keychain'de mevcut"
+    else
+        echo "  ⚠  Sırlar hâlâ yok — uygulama sırsız başlatılacak (fiyat çalışır)."
+    fi
 fi
 
-# ── 4. Login'de otomatik başlatma ───────────────────────────────────────
+# ── 5. Login'de otomatik başlatma ───────────────────────────────────────
 echo ""
-echo "[ 4/5 ] Login'de otomatik başlatma ayarlanıyor..."
+echo "[ 5/6 ] Login'de otomatik başlatma ayarlanıyor..."
 
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" << EOF
@@ -110,9 +129,9 @@ launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST" 2>/dev/null || true
 echo "  ✓ Her oturum açılışında otomatik başlayacak"
 
-# ── 5. Uygulamayı başlat ────────────────────────────────────────────────
+# ── 6. Uygulamayı başlat ────────────────────────────────────────────────
 echo ""
-echo "[ 5/5 ] Uygulama başlatılıyor..."
+echo "[ 6/6 ] Uygulama başlatılıyor..."
 
 pkill -f "ekran_hisse.*main.py" 2>/dev/null || true
 sleep 1

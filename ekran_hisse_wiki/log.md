@@ -63,3 +63,36 @@ bulgu 6/6 CONFIRMED. Test 191→200, ruff/pyflakes temiz.
 
 **Lint (sonrası):** backlinks 9 sayfa + index yenilendi; broken_links/orphans/
 missing_summary/stubs = 0.
+
+---
+
+## 2026-08-13 — Resize özelliği senkronu + Tweet alarm 402 teşhisi
+
+**Kaynak:** `sources/04_oturum_2026-08-13.md` (canlı X API probe + oturum işleri).
+
+**Kod (bu oturum, `overlay.py` + test):**
+- Yatay/dikey kenar-köşe boyutlandırma + `ui_geom.json` kalıcılığı; `PANEL_W`/`ekran//2`
+  sabitleri → çalışma zamanı `self._panel_w`/`self._win_h`. 211 test (10 yeni), veri korundu.
+- (Önceki oturum) font ölçekleme A−/A+ + `ui_scale.json`; sembol evreni `is_known`
+  kısıtı kaldırıldı (biçim kontrolü + varsayılan eşleme).
+
+**Wiki güncellemeleri:**
+- overlay_window: kenar/köşe boyutlandırma + font ölçekleme bölümleri; sağ→sağ-alt
+  yaslama düzeltmesi; 2026-08-13 fix girdisi.
+- twitter_client: **402 "credits depleted"** canlı sorunu eklendi; `TWITTER_QUERY`
+  okunmuyor iddiası doğrulandı → **okunuyor** (düzeltildi).
+- symbols: `is_known` ekleme kapısının kaldırıldığı belgelendi (KNOWN yalnız eşleme için).
+- known_issues: F6/F7/F8 yeni özellikler; **🔴 Tweet alarmı 402** kök-neden bölümü;
+  `TWITTER_QUERY` dead-config maddesi çözüldü olarak işaretlendi.
+- architecture_overview: `ui_scale.json`/`ui_geom.json` UI-tercih kalıcılığı eklendi.
+
+**Çelişki/boşluk kapatma:** "TWITTER_QUERY dead config" (2 sayfada) gerçekle çelişiyordu
+— kod okundu, çözüldü olarak işaretlendi. "sağ kenarda konumlanır" ifadesi sağ-alta
+yaslama gerçeğiyle güncellendi.
+
+**Teşhis sonucu:** Tweet alarmı = 𝕏 sekmesi kırmızı rozeti (`_tw_unread`) + `_tw_hl`
+vurgu; kod çalışıyor ama X API 402 kredi tükenmesi nedeniyle akış boş. Kod dışı çözüm
+(plan/kredi yenile veya kredili token).
+
+**Lint (sonrası):** backlinks 9 sayfa + index yenilendi; broken_links/orphans/
+missing_summary/missing_frontmatter/stale/stubs = 0.

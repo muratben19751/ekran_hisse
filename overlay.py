@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -24,6 +25,7 @@ from PySide6.QtCore import (
     QMimeData,
     QPoint,
     QPropertyAnimation,
+    QRect,
     Qt,
     QTimer,
     Signal,
@@ -103,7 +105,11 @@ def _migrate_legacy(user_path, legacy_path):
         log.warning("veri taşınamadı (%s → %s): %s", legacy_path, user_path, e)
 
 # ── Geometri ────────────────────────────────────────────────────────────────
-PANEL_W = 300
+PANEL_W = 300            # varsayılan açık panel genişliği (kayıt yoksa)
+PANEL_W_MIN = 220        # kullanıcı boyutlandırma alt sınırı
+PANEL_W_MAX = 900        # üst sınır
+WIN_H_MIN = 200          # pencere yükseklik alt sınırı
+RESIZE_MARGIN = 6        # kenar/köşe yakalama bölgesi kalınlığı (px)
 TAB_W   = 32
 TAB_H   = 52
 TAB_GAP = 6
@@ -145,17 +151,91 @@ MIME_ROW = "application/x-ekranhisse-symbol"
 
 
 # ── Yardımcılar ─────────────────────────────────────────────────────────────
+# Global font ölçeği: A−/A+ butonlarıyla değişir, ~/.ekranhisse altında kalıcı.
+# _f() tüm font boyutlarını bu çarpanla ölçekler; ölçek değişince _font_cache
+# temizlenip sayfalar yeniden inşa edilir. Sabit satır/sütun yükseklikleri de
+# _sf() ile ölçeğe bağlanır ki büyük fontlar kırpılmasın.
+_FONT_SCALE = 1.0
+_FONT_SCALE_MIN = 0.8
+_FONT_SCALE_MAX = 1.8
+_FONT_SCALE_STEP = 0.1
+SCALE_FILE = paths.data_file("ui_scale.json")
+
+# Pencere geometrisi (panel genişliği + pencere yüksekliği): kullanıcı sol/üst
+# kenardan boyutlandırınca ~/.ekranhisse altında kalıcı. _WIN_H_SAVED None ise
+# "ekran//2 varsayılanını kullan" demektir (kullanıcı henüz boyutlandırmadı).
+GEOM_FILE = paths.data_file("ui_geom.json")
+_PANEL_W_SAVED = PANEL_W
+_WIN_H_SAVED = None
+
 _font_cache: dict = {}
 
+
 def _f(size, weight=QFont.Normal):
-    key = (size, weight)
+    # Ölçekli boyut cache anahtarına girsin; ölçek değişince yeni fontlar üretilir.
+    scaled = max(1, round(size * _FONT_SCALE))
+    key = (scaled, weight)
     f = _font_cache.get(key)
     if f is None:
         f = QFont()
-        f.setPointSize(size)
+        f.setPointSize(scaled)
         f.setWeight(weight)
         _font_cache[key] = f
     return f
+
+
+def _sf(px: int) -> int:
+    """Sabit piksel boyutunu (satır/sütun yüksekliği vb.) font ölçeğine bağla."""
+    return max(1, round(px * _FONT_SCALE))
+
+
+def load_scale():
+    """Kayıtlı font ölçeğini oku; yoksa/bozuksa 1.0. Sınır içine kırp."""
+    global _FONT_SCALE
+    try:
+        with open(SCALE_FILE) as f:
+            val = float(json.load(f).get("scale", 1.0))
+        _FONT_SCALE = min(_FONT_SCALE_MAX, max(_FONT_SCALE_MIN, val))
+    except (OSError, ValueError, json.JSONDecodeError, TypeError, AttributeError):
+        _FONT_SCALE = 1.0
+    return _FONT_SCALE
+
+
+def save_scale():
+    _save_json(SCALE_FILE, {"scale": round(_FONT_SCALE, 3)})
+
+
+def load_geom():
+    """Kayıtlı panel genişliği + pencere yüksekliğini oku; sınır içine kırp.
+
+    panel_w yoksa/bozuksa PANEL_W. win_h yoksa None döner (constructor o zaman
+    ekran//2 varsayılanına düşer). Ekran yüksekliği kırpması burada güvenli
+    aralıkta yapılır; nihai ekran-bazlı kırpma constructor/_reposition'da tekrar
+    uygulanır (dosya daha uzun bir monitörde yazılmış olabilir).
+    """
+    global _PANEL_W_SAVED, _WIN_H_SAVED
+    panel_w = PANEL_W
+    win_h = None
+    try:
+        with open(GEOM_FILE) as f:
+            data = json.load(f)
+        panel_w = min(PANEL_W_MAX, max(PANEL_W_MIN, int(data["panel_w"])))
+    except (OSError, ValueError, json.JSONDecodeError, TypeError, KeyError):
+        panel_w = PANEL_W
+    try:
+        win_h = max(WIN_H_MIN, int(data["win_h"]))
+    except (NameError, ValueError, TypeError, KeyError):
+        win_h = None
+    _PANEL_W_SAVED = panel_w
+    _WIN_H_SAVED = win_h
+    return panel_w, win_h
+
+
+def save_geom(panel_w, win_h):
+    global _PANEL_W_SAVED, _WIN_H_SAVED
+    _PANEL_W_SAVED = int(panel_w)
+    _WIN_H_SAVED = int(win_h)
+    _save_json(GEOM_FILE, {"panel_w": _PANEL_W_SAVED, "win_h": _WIN_H_SAVED})
 
 
 # Geriye dönük uyumlu takma adlar — asıl mantık logic.py'da.
@@ -348,7 +428,10 @@ class _SheetDialog(QDialog):
         sc = QApplication.primaryScreen().availableGeometry()
         self.box.setGeometry(0, 0, w, h)
         self.resize(w, h)
-        x = sc.x() + sc.width() - TAB_W - PANEL_W - w - 8
+        # Sheet'i açık panelin SOLUNA yerleştir; panel genişliği kullanıcı
+        # boyutlandırmasıyla değişebildiğinden çalışma zamanı değerini kullan.
+        pw = getattr(self.parent(), "_panel_w", PANEL_W)
+        x = sc.x() + sc.width() - TAB_W - pw - w - 8
         y = sc.y() + (sc.height() - h) // 2
         self.move(x, y)
         QTimer.singleShot(0, lambda: _set_ns_window_level(self, level=1002, make_key=True))
@@ -455,6 +538,13 @@ class StockPickerSheet(_SheetDialog):
         q = text.strip().upper()
         items = [s for s in _BIST_SYMBOLS
                  if s not in self._existing and (not q or s.startswith(q))]
+        # Sembol evreni kısıtı kaldırıldığından, yazılan sembol listede yoksa da
+        # eklenebilir. Bilinen listede tam eşleşme yoksa kullanıcının yazdığını
+        # bir aday satır olarak en üste ekle ki Enter'la neyin ekleneceği belli
+        # olsun (boş liste 'eklenemez' izlenimi vermesin).
+        if (q and q not in items and q not in self._existing
+                and re.fullmatch(r"[A-Z0-9.\-]{1,20}", q)):
+            items.insert(0, q)
         self.lst.clear()
         self.lst.addItems(items)
         if self.lst.count() > 0:
@@ -463,8 +553,15 @@ class StockPickerSheet(_SheetDialog):
     def _ok(self):
         selected = self.lst.currentItem()
         typed = self.inp.text().strip().upper()
-        candidate = selected.text() if selected else typed
-        if candidate and sym_universe.is_known(candidate):
+        # Yazılan metin listede eşleşme olsa bile (kullanıcı bir şey yazıp
+        # imleci listeye taşımadıysa) önceliklidir: liste ilk satırı otomatik
+        # seçili olduğundan, kullanıcının yazdığı 'THYA' yerine 'THYAO' eklenmesin
+        # diye — yazılan varsa onu, yoksa liste seçimini al.
+        candidate = typed or (selected.text() if selected else "")
+        # Sembol evreni artık bir kısıt değil: listede olmasa da (yeni halka arz,
+        # nadir sembol) kullanıcının yazdığı sembol doğrudan kabul edilir. Data,
+        # varsayılan eşlemeyle (BIST:<SEM> / <SEM>.IS) çekilir; gelmezse '—'.
+        if candidate:
             self.value = candidate
             self.accept()
 
@@ -591,8 +688,8 @@ class Sparkline(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(14)
-        self.setMinimumWidth(36)
+        self.setFixedHeight(_sf(14))
+        self.setMinimumWidth(_sf(36))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._points = []
@@ -675,7 +772,7 @@ class StockRow(QWidget):
         self._reached = False
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setObjectName("row")
-        self.setFixedHeight(26)
+        self.setFixedHeight(_sf(26))
         self.setCursor(Qt.PointingHandCursor)
 
         outer = QVBoxLayout(self)
@@ -683,14 +780,14 @@ class StockRow(QWidget):
         outer.setSpacing(0)
 
         top = QWidget()
-        top.setFixedHeight(26)
+        top.setFixedHeight(_sf(26))
         top.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(top)
         lay.setContentsMargins(12, 0, 12, 0)
         lay.setSpacing(8)
 
         head = QWidget()
-        head.setFixedWidth(60)
+        head.setFixedWidth(_sf(60))
         head.setStyleSheet("background: transparent;")
         hl = QHBoxLayout(head)
         hl.setContentsMargins(0, 0, 0, 0)
@@ -709,13 +806,13 @@ class StockRow(QWidget):
 
         self.lbl_price = QLabel("—")
         self.lbl_price.setFont(_f(11))
-        self.lbl_price.setFixedWidth(70)
+        self.lbl_price.setFixedWidth(_sf(70))
         self.lbl_price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_price.setStyleSheet(f"color: {C_TEXT2}; background: transparent;")
 
         self.lbl_pct = QLabel("—")
         self.lbl_pct.setFont(_f(11, QFont.DemiBold))
-        self.lbl_pct.setFixedWidth(46)
+        self.lbl_pct.setFixedWidth(_sf(46))
         self.lbl_pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_pct.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
 
@@ -726,7 +823,7 @@ class StockRow(QWidget):
 
         self.lbl_rsi = QLabel("")
         self.lbl_rsi.setFont(_f(8))
-        self.lbl_rsi.setFixedWidth(80)
+        self.lbl_rsi.setFixedWidth(_sf(80))
         self.lbl_rsi.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_rsi.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         self.lbl_rsi.setVisible(False)
@@ -892,7 +989,7 @@ class GroupHeader(QWidget):
         self.symbol = uid
         self._collapsed = collapsed
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(16)
+        self.setFixedHeight(_sf(16))
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 0, 12, 0)
@@ -1056,6 +1153,13 @@ class OverlayWindow(QWidget):
         self._float_btns = []
         self._monitor_btns = []
         self._drag_pos = None  # sürükleme için
+        # Kullanıcı boyutlandırma durumu — sol/üst kenardan sürükleyerek panel
+        # genişliği/pencere yüksekliği ayarlanır, release'te ~/.ekranhisse'e kaydolur.
+        self._panel_w = PANEL_W          # çalışma zamanı açık genişlik (PANEL_W yerine)
+        self._win_h = None               # constructor'da ekran bilinince atanır
+        self._resize_edge = None         # None | 'left' | 'top' | 'topleft'
+        self._resize_origin = None       # (globalPos, başlangıç QRect) — press'te yakalanır
+        self.setMouseTracking(True)      # buton basılı olmadan da imleç geri bildirimi
 
         self._notes = []
         self._current_note = None
@@ -1074,11 +1178,18 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         QApplication.instance().installEventFilter(self)
 
+        load_scale()   # kayıtlı font ölçeğini _build_ui'den önce uygula
+        load_geom()    # kayıtlı panel genişliği/pencere yüksekliği (_build_ui'den önce)
+        self._panel_w = _PANEL_W_SAVED
         self._build_ui()
 
         self._current_sc = _main_screen()
         sc_avail = QApplication.primaryScreen().availableGeometry()
-        win_h = sc_avail.height() // 2
+        # Yükseklik: kayıt varsa onu, yoksa ekranın yarısı. Her hâlde ekran alanına kırp
+        # (dosya daha uzun bir monitörde yazılmış olabilir).
+        self._win_h = _WIN_H_SAVED if _WIN_H_SAVED is not None else sc_avail.height() // 2
+        self._win_h = max(WIN_H_MIN, min(self._win_h, sc_avail.height()))
+        win_h = self._win_h
         win_y = sc_avail.y() + sc_avail.height() - win_h
         self._anim = QPropertyAnimation(self.panel, b"maximumWidth")
         self._anim.setDuration(ANIM_MS)
@@ -1144,7 +1255,7 @@ class OverlayWindow(QWidget):
             f" border: 1px solid {C_BORDER}; border-right: none; }}"
         )
         self.panel.setMinimumWidth(0)
-        self.panel.setMaximumWidth(PANEL_W)
+        self.panel.setMaximumWidth(self._panel_w)
 
         pnl = QVBoxLayout(self.panel)
         pnl.setContentsMargins(0, 0, 0, 0)
@@ -1165,6 +1276,160 @@ class OverlayWindow(QWidget):
     def _toggle_pin(self):
         self._pinned = not self._pinned
         self._update_pin_style()
+
+    # ── Boyutlandırma (sol/üst kenar + sol-üst köşe) ─────────────────────────
+    # Pencere sağ-alta yaslı; sağ kenarda sekme şeridi, alt kenarda ekran-yaslama
+    # var — bu ikisi sabit. Boyutlandırılabilir kenarlar SOL (genişlik) ve ÜST
+    # (yükseklik, yukarı büyür). Sürüklerken sağ (right) ve alt (bottom) kenar
+    # sabit tutulur; sol/üst kenar hareket eder.
+    def _hit_zone(self, pos):
+        """Yerel (widget) koordinatındaki nokta hangi boyutlandırma bölgesinde?"""
+        m = RESIZE_MARGIN
+        near_left = pos.x() <= m
+        near_top = pos.y() <= m
+        if near_left and near_top:
+            return "topleft"
+        if near_left:
+            return "left"
+        if near_top:
+            return "top"
+        return None
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            zone = self._hit_zone(e.position().toPoint())
+            if zone is not None:
+                self._resize_edge = zone
+                self._resize_origin = (e.globalPosition().toPoint(), QRect(self.geometry()))
+                e.accept()
+                return  # press'i tüket: dış-tık/taşıma mantığı görmesin
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._resize_edge is not None and (e.buttons() & Qt.LeftButton):
+            self._perform_resize(e.globalPosition().toPoint())
+            e.accept()
+            return
+        # Sürükleme yok: kenar bölgesine göre imleç geri bildirimi
+        zone = self._hit_zone(e.position().toPoint())
+        if zone == "left":
+            self.setCursor(Qt.SizeHorCursor)
+        elif zone == "top":
+            self.setCursor(Qt.SizeVerCursor)
+        elif zone == "topleft":
+            self.setCursor(Qt.SizeFDiagCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._resize_edge is not None:
+            save_geom(self._panel_w, self._win_h)
+            self._resize_edge = None
+            self._resize_origin = None
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def _perform_resize(self, cur):
+        g0, r0 = self._resize_origin
+        edge = self._resize_edge
+        right = r0.right()
+        bottom = r0.bottom()
+        new_w = r0.width()
+        new_h = r0.height()
+        new_x = r0.x()
+        new_y = r0.y()
+        sc_avail = self.screen().availableGeometry()
+
+        if edge in ("left", "topleft"):
+            dx = cur.x() - g0.x()
+            panel_w = min(PANEL_W_MAX, max(PANEL_W_MIN, r0.width() - dx - TAB_W))
+            self._panel_w = panel_w
+            new_w = TAB_W + panel_w
+            new_x = right - new_w + 1          # sağ kenarı sabitle
+        if edge in ("top", "topleft"):
+            dy = cur.y() - g0.y()
+            new_h = max(WIN_H_MIN, min(r0.height() - dy, sc_avail.height()))
+            self._win_h = new_h
+            new_y = bottom - new_h + 1          # alt kenarı sabitle
+
+        self.panel.setMaximumWidth(self._panel_w)   # panel içeriği pencere ile senkron
+        self.setFixedSize(new_w, new_h)
+        self.move(new_x, new_y)
+        self._current_sc = self.screen().geometry()
+
+    # ── Font ölçeği ──────────────────────────────────────────────────────
+    def _font_larger(self):
+        self._change_font_scale(+_FONT_SCALE_STEP)
+
+    def _font_smaller(self):
+        self._change_font_scale(-_FONT_SCALE_STEP)
+
+    def _change_font_scale(self, delta):
+        global _FONT_SCALE
+        new = min(_FONT_SCALE_MAX, max(_FONT_SCALE_MIN, round(_FONT_SCALE + delta, 3)))
+        if new == _FONT_SCALE:
+            return  # sınıra dayandı; boşuna yeniden inşa etme
+        _FONT_SCALE = new
+        _font_cache.clear()   # ölçekli fontlar yeniden üretilsin
+        save_scale()
+        self._rebuild_all_pages()
+
+    def _rebuild_all_pages(self):
+        """Font ölçeği değişince tüm sayfaları yeni ölçekle yeniden kur.
+
+        Sayfa widget'ları (_build_*_page) font boyutlarını kurulumda okur;
+        ölçek sonradan değişince yalnızca cache temizlemek yetmez, widget'ların
+        setFont/_sf ile yeniden kurulması gerekir. Kalıcı state (portföy, notlar,
+        twitter, collapse) bellek/diskte durur; sayfalar ondan yeniden doğar —
+        HİÇBİR kullanıcı verisi silinmez.
+        """
+        pnl = self.panel.layout()
+        for page in (self.stocks_page, self.notes_page, self.twitter_page):
+            pnl.removeWidget(page)
+            page.setParent(None)
+            page.deleteLater()
+
+        # Kontrol butonu registry'leri eski (silinecek) butonları tutuyor;
+        # _build_*_page yeni butonları taze ekleyecek. Temizlenmezse
+        # _update_pin_style/_update_float_style silinmiş C++ QLabel'lara
+        # setStyleSheet deneyip RuntimeError ile çöker.
+        self._pin_btns.clear()
+        self._float_btns.clear()
+        self._monitor_btns.clear()
+
+        # rows/headers/cards eski (silinmiş) widget'lara işaret ediyor; temizle
+        # ki _build_stocks_page → _rebuild_rows taze sözlüklerle kursun.
+        self.rows.clear()
+        self.headers.clear()
+        self.cards.clear()
+        self._sections = []
+        self._tw_rows = None
+        self._tw_chip_widgets = []
+
+        self.stocks_page = self._build_stocks_page()
+        pnl.addWidget(self.stocks_page)
+        self.notes_page = self._build_notes_page()
+        pnl.addWidget(self.notes_page)
+        self.twitter_page = self._build_twitter_page()
+        pnl.addWidget(self.twitter_page)
+
+        # Görünürlüğü mevcut moda göre ayarla
+        self.stocks_page.setVisible(self._mode == 1)
+        self.notes_page.setVisible(self._mode == 2)
+        self.twitter_page.setVisible(self._mode == 3)
+
+        # İçeriği geri yükle: fiyatlar (cache'ten), notlar listesi, twitter akışı.
+        self._apply_cached_prices()
+        for sym, row in self.rows.items():
+            rsi = self._rsi_cache.get(sym)
+            if rsi:
+                row.update_rsi(rsi)
+        if self._notes:
+            self._refresh_notes_list()
+        if self._tw_tweets:
+            self._twitter_render()
 
     def _update_pin_style(self):
         on  = f"background: rgba(48,209,88,40); border-radius: 8px; color: {C_GREEN};"
@@ -1210,15 +1475,17 @@ class OverlayWindow(QWidget):
     def _reposition_to_screen(self, screen):
         sc = screen.geometry()
         sc_avail = screen.availableGeometry()
-        win_h = sc_avail.height() // 2
+        # Kayıtlı yüksekliği YENİ ekrana kırp (daha kısa monitör güvenliği) ve sakla.
+        self._win_h = max(WIN_H_MIN, min(self._win_h, sc_avail.height()))
+        win_h = self._win_h
         win_y = sc_avail.y() + sc_avail.height() - win_h
         self._current_sc = sc
         # Panel AÇIKKEN (floating modda ⊞ ile monitör değiştirmek yalnızca panel
         # açıkken mümkün) pencereyi TAB_W'ye daraltmak paneli görünmez bırakır ve
         # animasyon durumu (panel.maximumWidth) pencere genişliğiyle desenkronize
-        # olur. Panelin mevcut açık genişliğini (maximumWidth) koruyarak senkronu
+        # olur. Panelin mevcut açık genişliğini (self._panel_w) koruyarak senkronu
         # sürdür.
-        panel_w = self.panel.maximumWidth() if self._mode != 0 else 0
+        panel_w = self._panel_w if self._mode != 0 else 0
         win_w = TAB_W + panel_w
         self.setFixedSize(win_w, win_h)
         self.move(sc.x() + sc.width() - win_w, win_y)
@@ -1284,12 +1551,22 @@ class OverlayWindow(QWidget):
         kopyalamak yerine bunu çağırır (DRY; bir davranış değişince tek yer).
         """
         b = QLabel(glyph)
-        b.setFixedSize(18, 18)
+        # Tek karakterli glyph'ler (📌 ⬆ ⊞) kare kutuya sığar; "A−"/"A+" gibi
+        # çok karakterli etiketler için biraz daha geniş. Boyut/font ölçeğe bağlı.
+        wide = len(glyph) > 1
+        b.setFixedSize(_sf(24 if wide else 18), _sf(18))
         b.setAlignment(Qt.AlignCenter)
-        b.setFont(_f(11))
+        b.setFont(_f(11, QFont.DemiBold if wide else QFont.Normal))
         b.setCursor(Qt.PointingHandCursor)
         b.setToolTip(tooltip)
         b.mousePressEvent = lambda e: handler()
+        if wide:
+            # A−/A+ dinamik stil registry'sine girmez; sabit görünür stil ver.
+            b.setStyleSheet(
+                f"QLabel {{ color: {C_TEXT2}; background: rgba(255,255,255,20);"
+                f" border-radius: {R_BTN}px; }}"
+                f"QLabel:hover {{ color: {C_TEXT}; background: {C_CTRL_HOVER}; }}"
+            )
         if monitor:
             b.setVisible(len(QApplication.screens()) > 1)
         registry.append(b)
@@ -1315,12 +1592,19 @@ class OverlayWindow(QWidget):
             "⊞", "Diğer monitöre taşı", self._cycle_monitor, self._monitor_btns,
             monitor=True)
 
+        zoom_out_btn = self._control_button(
+            "A−", "Yazıyı küçült", self._font_smaller, [])
+        zoom_in_btn = self._control_button(
+            "A+", "Yazıyı büyült", self._font_larger, [])
+
         status = QLabel(status_text)
         status.setFont(_f(10))
         status.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         h.addWidget(lbl)
         h.addStretch()
+        h.addWidget(zoom_out_btn)
+        h.addWidget(zoom_in_btn)
         h.addWidget(pin_btn)
         h.addWidget(float_btn)
         h.addWidget(monitor_btn)
@@ -1541,12 +1825,18 @@ class OverlayWindow(QWidget):
         monitor_btn = self._control_button(
             "⊞", "Diğer monitöre taşı", self._cycle_monitor, self._monitor_btns,
             monitor=True)
+        zoom_out_btn = self._control_button(
+            "A−", "Yazıyı küçült", self._font_smaller, [])
+        zoom_in_btn = self._control_button(
+            "A+", "Yazıyı büyült", self._font_larger, [])
 
         h.addWidget(title)
         h.addWidget(self.lbl_tw_count)
         h.addWidget(self.lbl_twitter_status)
         h.addStretch()
         h.addWidget(self.btn_tw_read)
+        h.addWidget(zoom_out_btn)
+        h.addWidget(zoom_in_btn)
         h.addWidget(pin_btn)
         h.addWidget(float_btn)
         h.addWidget(monitor_btn)
@@ -1984,12 +2274,12 @@ class OverlayWindow(QWidget):
             if mode == 3:
                 self._tw_unread.clear()
                 self._update_tab_badge()
-            target_w = PANEL_W
+            target_w = self._panel_w
         self._paint_tab(self.tab_stock, self._mode == 1)
         self._paint_tab(self.tab_notes, self._mode == 2)
         self._paint_tab(self.tab_twitter, self._mode == 3)
         self._anim.stop()
-        self._anim.setStartValue(min(self.panel.maximumWidth(), PANEL_W))
+        self._anim.setStartValue(min(self.panel.maximumWidth(), self._panel_w))
         self._anim.setEndValue(target_w)
         self._anim.start()
 
@@ -2009,6 +2299,7 @@ class OverlayWindow(QWidget):
     def changeEvent(self, event):
         if (event.type() == QEvent.WindowDeactivate and self._mode != 0
                 and not self._pinned and not self._floating
+                and self._resize_edge is None
                 and not self._modal_open()):
             self._toggle(self._mode)
         super().changeEvent(event)
@@ -2016,6 +2307,7 @@ class OverlayWindow(QWidget):
     def eventFilter(self, obj, event):
         if (event.type() == QEvent.MouseButtonPress and self._mode != 0
                 and not self._pinned and not self._floating
+                and self._resize_edge is None
                 and not self._modal_open()):
             gp = event.globalPosition().toPoint()
             if not self.geometry().contains(gp):
@@ -2030,6 +2322,7 @@ class OverlayWindow(QWidget):
 
             def handler(nsevent):
                 if (self._mode == 0 or self._pinned or self._floating
+                        or self._resize_edge is not None
                         or self._modal_open()):
                     return
                 loc = _NSEvent.mouseLocation()
@@ -2046,6 +2339,7 @@ class OverlayWindow(QWidget):
 
     def _check_outside_click(self):
         if (self._mode == 0 or not _APPKIT_OK or self._pinned or self._floating
+                or self._resize_edge is not None
                 or self._modal_open()):
             return
         try:
@@ -2177,11 +2471,11 @@ class OverlayWindow(QWidget):
         # Anlık: sadece "Ekle" butonu görünürlüğü (ucuz)
         q = text.strip().upper()
         self._filter = q
-        known = any(s["symbol"].upper() == q for s in self.stocks)
-        # Buton yalnızca bilinen ama henüz eklenmemiş sembolde görünsün.
-        self.btn_add_inline.setVisible(
-            len(q) >= 3 and not known and sym_universe.is_known(q)
-        )
+        already = any(s["symbol"].upper() == q for s in self.stocks)
+        # Buton, henüz eklenmemiş ve geçerli biçimdeki her sembolde görünür
+        # (sembol evreni kısıtı kaldırıldı; is_known artık kapı değil).
+        valid_form = bool(re.fullmatch(r"[A-Z0-9.\-]{1,20}", q))
+        self.btn_add_inline.setVisible(len(q) >= 3 and not already and valid_form)
         # Gecikmeli: liste yeniden kurma (200ms yazma durunca)
         self._search_timer.start(200)
 
@@ -2193,9 +2487,12 @@ class OverlayWindow(QWidget):
         sym = self.search.text().strip().upper()
         if not sym:
             return
-        if not sym_universe.is_known(sym):
-            # Sessizce yutma — kullanıcıya bilinmeyen sembolü bildir.
-            self.lbl_stock_status.setText(f"Bilinmeyen sembol: {sym}")
+        # Sembol evreni kısıtı kaldırıldı: listede olmasa da kullanıcının yazdığı
+        # sembol eklenir (data varsayılan eşlemeyle çekilir, gelmezse '—').
+        # Yalnızca kaba bir biçim kontrolü: harf/rakam/nokta/tire (BIST ve özel
+        # ticker'lar bunlarla ifade edilir); boşluklu/anlamsız girdi eklenmesin.
+        if not re.fullmatch(r"[A-Z0-9.\-]{1,20}", sym):
+            self.lbl_stock_status.setText(f"Geçersiz sembol: {sym}")
             return
         if not any(s["symbol"] == sym for s in self.stocks):
             self.stocks.append({"symbol": sym, "entry": None, "exit": None})

@@ -97,6 +97,12 @@ Tüm kalıcı veri (`stocks.json`, `tw_symbols.json`, `notes_config.env`, `.ekra
 artık bundle Resources'a YAZILMAZ (kullanıcı verisi; `.gitignore`'da). Atomik JSON
 yazımı: tmp dosyaya yaz + `os.replace` (yazma hatasında mevcut dosya bozulmaz).
 
+**UI tercihleri (2026-08-13):** aynı dizinde iki kalıcı UI dosyası daha:
+`ui_scale.json` (font ölçeği `_FONT_SCALE`) ve `ui_geom.json` (panel genişliği +
+pencere yüksekliği). İkisi de aynı `load_*`/`save_*` + atomik `_save_json` desenini
+kullanır; kullanıcı verisi değil UI durumu olduğundan silinmeleri portföyü/notları
+etkilemez. Bkz. [[overlay_window]].
+
 ## Uygulama paketi senkronizasyonu
 `EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. **Tek aktif kaynak proje köküdür.**
 

@@ -1,17 +1,19 @@
 ---
 title: OverlayWindow
 type: entity
-summary: Ana pencere widget'ı; şeffaf macOS overlay olarak sağ kenarda açılır, hisse/Twitter/not sekmelerini barındırır; floating, monitör geçişi ve sürükleme destekler.
+summary: Ana pencere widget'ı; şeffaf macOS overlay olarak sağ-alta yaslı açılır, hisse/Twitter/not sekmelerini barındırır; floating, monitör geçişi, sürükleme, kenar/köşe boyutlandırma ve font ölçekleme destekler.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
-last_updated: 2026-08-11
+  - sources/04_oturum_2026-08-13.md
+last_updated: 2026-08-13
 ---
 
 # OverlayWindow
 
 `overlay.py` içindeki ana widget. PySide6 `QWidget` tabanlı, macOS'ta şeffaf bir
-overlay olarak sağ kenarda konumlanır. Sekme çubuğu (◧/✎/𝕏) ile açılıp kapanır.
+overlay olarak ekranın **sağ-alt** köşesine yaslı konumlanır. Sekme çubuğu (◧/✎/𝕏)
+ile açılıp kapanır.
 
 ## Sekmeler
 - **Hisse (◧)** — BIST hisse takip listesi, fiyat + sparkline + RSI
@@ -27,6 +29,33 @@ Her sayfanın başlık satırında üç buton bulunur:
 ## Sürükleme (2026-08-11)
 Başlık satırı widget'ına `mousePressEvent/Move/Release` bağlı; pencere serbestçe taşınabilir.
 Taşıma sırasında `self._current_sc` güncellenir.
+
+## Kenar/köşe boyutlandırma + kalıcılık (2026-08-13)
+Pencere sağ-alta yaslı frameless HUD olduğundan boyutlandırılabilir kenarlar
+**SOL** (genişlik), **ÜST** (yükseklik, yukarı büyür) ve **SOL-ÜST köşe**. Sağ
+kenardaki sekme şeridi ve alt kenardaki ekran-yaslaması sabit kalır.
+- OverlayWindow düzeyinde `mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent`
+  + `_hit_zone(pos)` (yerel koordinat → `'left'`/`'top'`/`'topleft'`/`None`),
+  `RESIZE_MARGIN=6` px yakalama. İmleç: SizeHor/SizeVer/SizeFDiag.
+- Sürüklerken sağ (`r0.right()`) ve alt (`r0.bottom()`) kenar sabit tutulur; sol/üst
+  kenar hareket eder. Sınırlar: genişlik `PANEL_W_MIN=220`–`PANEL_W_MAX=900`,
+  yükseklik `WIN_H_MIN=200`–ekran alanı (kırpma otomatik).
+- **Kalıcılık:** release'te `save_geom(self._panel_w, self._win_h)` →
+  `~/.ekranhisse/ui_geom.json`; açılışta `load_geom()` (font-ölçeği
+  `ui_scale.json` desenini yansıtır). Sabit `PANEL_W`/`ekran//2` yerine çalışma
+  zamanı `self._panel_w`/`self._win_h`; `_toggle` animasyonu,
+  `_reposition_to_screen` ve `_SheetDialog._place` bu değeri kullanır (bkz. [[paths]]).
+- Resize sırasında "dışarı tık = kapat" dört yolun (`eventFilter`, `changeEvent`,
+  NS global monitor, `_check_outside_click`) hepsinde `_resize_edge` guard'ıyla
+  devre dışı — panel resize sürüklemesinde kapanmaz.
+
+## Font ölçekleme (A−/A+)
+Başlık satırındaki `A−`/`A+` butonları global `_FONT_SCALE` çarpanını değiştirir
+(0.8–1.8 arası). `_f()` tüm fontları, `_sf()` sabit satır/sütun boyutlarını bu
+çarpanla ölçekler (büyük fontta kırpılmayı önler). Ölçek `~/.ekranhisse/ui_scale.json`'a
+kalıcı; değişince `_font_cache` temizlenir ve `_rebuild_all_pages()` sayfaları taze
+ölçekle yeniden kurar — **hiçbir kullanıcı verisi silinmez** (portföy/notlar/twitter
+bellek+diskten yeniden doğar).
 
 ## Floating / Always-on-Top (2026-08-11)
 - `self._floating = True` varsayılan
@@ -51,6 +80,11 @@ Taşıma sırasında `self._current_sc` güncellenir.
 - Outside-click fallback: 150 ms (global monitor aktifse durur)
 
 ## Önemli fixler
+
+### 2026-08-13
+- Kenar/köşe boyutlandırma + `ui_geom.json` kalıcılığı eklendi (yukarıda); `PANEL_W`/`ekran//2` sabitleri → çalışma zamanı `self._panel_w`/`self._win_h`
+- Font ölçekleme (A−/A+) + `ui_scale.json` — büyük/küçük yazı, `_rebuild_all_pages` ile veri-koruyan yeniden kurulum
+- Sembol evreni kısıtı kaldırıldı: `_add_from_search`/`StockPickerSheet` artık `is_known` kapısı yerine biçim kontrolü (`[A-Z0-9.-]`); listede olmayan sembol de eklenip varsayılan eşlemeyle (`BIST:<SEM>`/`<SEM>.IS`) çekilir
 
 ### 2026-08-11
 - `update_rsi`: `or` zinciri → `next(...is not None)` — NoneType/falsy-zero TypeError giderildi
@@ -84,5 +118,6 @@ Taşıma sırasında `self._current_sc` güncellenir.
 - [[paths]]
 - [[sparkline]]
 - [[stock_row]]
+- [[symbols]]
 - [[twitter_client]]
 <!-- BACKLINKS:END -->

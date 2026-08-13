@@ -40,6 +40,7 @@ def win(app, tmp_path, monkeypatch):
     monkeypatch.setattr(overlay, "TW_SYMBOLS_FILE", str(tmp_path / "tw.json"))
     monkeypatch.setattr(overlay, "_LEGACY_STOCKS", str(tmp_path / "ls.json"))
     monkeypatch.setattr(overlay, "_LEGACY_TW", str(tmp_path / "lt.json"))
+    monkeypatch.setattr(overlay, "GEOM_FILE", str(tmp_path / "ui_geom.json"))
     w = overlay.OverlayWindow(_Signals())
     yield w
     w.close()
@@ -199,13 +200,24 @@ def test_update_rsi_nan_never_crashes_and_hides_when_all_invalid(win):
     assert "15m:55" in r.lbl_rsi.text()
 
 
-# ── _add_from_search: bilinmeyen/boş/tekrar sembol koruması (#39) ─────────────
-def test_add_from_search_rejects_unknown_symbol(win):
+# ── _add_from_search: her geçerli sembol eklenir; geçersiz biçim reddedilir ──
+def test_add_from_search_accepts_unknown_symbol(win):
+    # Sembol evreni kısıtı kaldırıldı: listede olmayan (is_known False) ama
+    # geçerli biçimdeki sembol artık EKLENİR (data varsayılan eşlemeyle çekilir).
     win.stocks = []
-    win.search.setText("ZZZZZ")     # is_known False
+    win.search.setText("ZZZZZ")     # is_known False ama geçerli biçim
     win._add_from_search()
-    assert win.stocks == []          # geçersiz sembol stocks'a SIZMAMALI
-    assert "Bilinmeyen sembol" in win.lbl_stock_status.text()
+    assert any(s["symbol"] == "ZZZZZ" for s in win.stocks)
+
+
+def test_add_from_search_rejects_invalid_format(win):
+    # Geçersiz biçim (boşluk/özel karakter) hâlâ reddedilmeli — anlamsız girdi
+    # stocks'a sızmasın.
+    win.stocks = []
+    win.search.setText("AB CD!")    # boşluk + '!' → geçersiz
+    win._add_from_search()
+    assert win.stocks == []
+    assert "Geçersiz sembol" in win.lbl_stock_status.text()
 
 
 def test_add_from_search_empty_input_noop(win):
@@ -264,3 +276,138 @@ def test_modal_open_guards_outside_click_close(win, monkeypatch):
     monkeypatch.setattr(win, "_modal_open", lambda: False)
     win.eventFilter(win, _press())
     assert closed == [1]   # modal yokken kapandı
+
+
+# ── Boyutlandırma + kalıcılık: load_geom/save_geom roundtrip + clamp ─────────
+def test_geom_persist_roundtrip(app, tmp_path, monkeypatch):
+    # GEOM_FILE'ı tmp'ye yönlendir; save→load aynı (kırpılmış) değeri döndürmeli.
+    monkeypatch.setattr(overlay, "GEOM_FILE", str(tmp_path / "ui_geom.json"))
+    overlay.save_geom(400, 700)
+    pw, wh = overlay.load_geom()
+    assert pw == 400
+    assert wh == 700
+
+
+def test_geom_clamps_out_of_range(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(overlay, "GEOM_FILE", str(tmp_path / "ui_geom.json"))
+    # Aşırı büyük genişlik ve aşırı küçük yükseklik yaz → load sınıra kırpmalı.
+    overlay._save_json(str(tmp_path / "ui_geom.json"), {"panel_w": 9999, "win_h": 5})
+    pw, wh = overlay.load_geom()
+    assert pw == overlay.PANEL_W_MAX
+    assert wh == overlay.WIN_H_MIN
+
+
+def test_geom_missing_file_defaults(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(overlay, "GEOM_FILE", str(tmp_path / "yok.json"))
+    pw, wh = overlay.load_geom()
+    assert pw == overlay.PANEL_W   # varsayılan genişlik
+    assert wh is None              # yükseklik yok → constructor ekran//2'ye düşer
+
+
+def test_win_opens_at_saved_geometry(app, tmp_path, monkeypatch):
+    # Kaydedilmiş boyut → yeni pencere o genişlik/yükseklikte açılmalı.
+    monkeypatch.setattr(overlay, "STOCKS_FILE", str(tmp_path / "stocks.json"))
+    monkeypatch.setattr(overlay, "TW_SYMBOLS_FILE", str(tmp_path / "tw.json"))
+    monkeypatch.setattr(overlay, "_LEGACY_STOCKS", str(tmp_path / "ls.json"))
+    monkeypatch.setattr(overlay, "_LEGACY_TW", str(tmp_path / "lt.json"))
+    monkeypatch.setattr(overlay, "GEOM_FILE", str(tmp_path / "ui_geom.json"))
+    overlay.save_geom(420, 640)
+    w = overlay.OverlayWindow(_Signals())
+    try:
+        assert w._panel_w == 420
+        # Yükseklik ekran alanına kırpılır; offscreen ekranda 640 sığar.
+        avail = overlay.QApplication.primaryScreen().availableGeometry()
+        assert w._win_h == max(overlay.WIN_H_MIN, min(640, avail.height()))
+    finally:
+        w.close()
+        w.deleteLater()
+
+
+def test_win_defaults_to_half_screen_when_no_geom(win):
+    # GEOM_FILE fixture'da tmp'de ve yok → yükseklik ekranın yarısı olmalı.
+    avail = overlay.QApplication.primaryScreen().availableGeometry()
+    assert win._panel_w == overlay.PANEL_W
+    assert win._win_h == max(overlay.WIN_H_MIN,
+                             min(avail.height() // 2, avail.height()))
+
+
+# ── _toggle çalışma zamanı genişliğini kullanır (PANEL_W sabiti değil) ────────
+def test_toggle_uses_runtime_panel_w(win):
+    win._panel_w = 500
+    win._toggle(1)   # stocks sekmesini aç
+    assert win._anim.endValue() == 500
+    assert win._mode == 1
+
+
+# ── _hit_zone bölge testleri ─────────────────────────────────────────────────
+def test_hit_zone_regions(win):
+    from PySide6.QtCore import QPoint
+    m = overlay.RESIZE_MARGIN
+    assert win._hit_zone(QPoint(0, 0)) == "topleft"
+    assert win._hit_zone(QPoint(2, 100)) == "left"
+    assert win._hit_zone(QPoint(100, 2)) == "top"
+    assert win._hit_zone(QPoint(m + 50, m + 50)) is None
+
+
+# ── Resize sürüklemesi: sağ+alt kenar sabit, genişlik büyür, save_geom çağrılır ─
+def test_resize_drag_keeps_anchor_and_saves(win, monkeypatch):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QEvent, QPointF
+
+    win._toggle(1)   # panel açık (mode 1)
+    win._panel_w = overlay.PANEL_W
+    # Pencereyi bilinen bir geometriye yerleştir
+    win.setFixedSize(overlay.TAB_W + overlay.PANEL_W, 400)
+    win.move(1000, 300)
+    r0 = win.geometry()
+    right0, bottom0 = r0.right(), r0.bottom()
+
+    saved = []
+    monkeypatch.setattr(overlay, "save_geom", lambda pw, wh: saved.append((pw, wh)))
+
+    # Sol kenardan press → sola 60px sürükle (genişlemeli)
+    win._resize_edge = "left"
+    win._resize_origin = (QPoint(r0.x(), r0.y() + 50), overlay.QRect(r0))
+    win._perform_resize(QPoint(r0.x() - 60, r0.y() + 50))
+
+    assert win.geometry().right() == right0      # sağ kenar sabit
+    assert win.geometry().bottom() == bottom0    # alt kenar sabit
+    assert win._panel_w > overlay.PANEL_W        # genişledi
+
+    # Release → save_geom bir kez çağrılmalı
+    rel = QMouseEvent(QEvent.MouseButtonRelease, QPointF(0, 0), QPointF(0, 0),
+                      Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+    win.mouseReleaseEvent(rel)
+    assert len(saved) == 1
+    assert saved[0][0] == win._panel_w
+    assert win._resize_edge is None
+
+
+# ── Resize sırasında panel KAPANMAMALI (dış-tık guard) ───────────────────────
+def test_resize_does_not_close_panel(win, monkeypatch):
+    win._mode = 1
+    win._pinned = False
+    win._floating = False
+    win._resize_edge = "left"   # resize aktif
+    closed = []
+    monkeypatch.setattr(win, "_toggle", lambda m: closed.append(m))
+    monkeypatch.setattr(win, "_modal_open", lambda: False)
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+    press = QMouseEvent(QEvent.MouseButtonPress, QPointF(-9999, -9999),
+                        QPointF(-9999, -9999), Qt.LeftButton, Qt.LeftButton,
+                        Qt.NoModifier)
+    win.eventFilter(win, press)
+    assert closed == []   # resize sırasında kapanmadı
+
+
+# ── save_geom yalnızca GEOM_FILE yazar; hisse/tw verisine dokunmaz ───────────
+def test_save_geom_touches_only_geom_file(app, tmp_path, monkeypatch):
+    written = []
+    monkeypatch.setattr(overlay, "GEOM_FILE", str(tmp_path / "ui_geom.json"))
+    monkeypatch.setattr(overlay, "_save_json",
+                        lambda path, data: written.append(path))
+    overlay.save_geom(360, 500)
+    assert written == [str(tmp_path / "ui_geom.json")]
+

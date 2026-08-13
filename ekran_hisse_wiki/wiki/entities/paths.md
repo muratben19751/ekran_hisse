@@ -40,4 +40,5 @@ Kalıcı dosyalar: `stocks.json`, `tw_symbols.json`, `notes_config.env`,
 ## Referenced by
 
 - [[architecture_overview]]
+- [[overlay_window]]
 <!-- BACKLINKS:END -->

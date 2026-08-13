@@ -1,14 +1,15 @@
 ---
 title: Bilinen Sorunlar
 type: synthesis
-summary: EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar ve teknik borç; 3. tur (22 fix) adversarial doğrulamayla kapandı, kalan açık maddeler işaretli.
+summary: EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar + teknik borç; ayrıca 2026-08-13 canlı bulgusu — tweet alarmı X API 402 "credits depleted" nedeniyle işlevsiz (hesap/plan sorunu, kod değil).
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
   - sources/03_deepr_review_round2_2026-08-12.md
+  - sources/04_oturum_2026-08-13.md
 related:
   - wiki/synthesis/architecture_overview.md
-last_updated: 2026-08-12
+last_updated: 2026-08-13
 ---
 
 # Bilinen Sorunlar
@@ -107,6 +108,39 @@ last_updated: 2026-08-12
 
 ---
 
+## ✅ Yeni özellikler (2026-08-13)
+
+| # | Özellik |
+|---|---------|
+| F6 | **Font ölçekleme** — başlık satırında `A−`/`A+`; `_FONT_SCALE` (0.8–1.8), `_f()`/`_sf()` ölçekler, `ui_scale.json` kalıcı, `_rebuild_all_pages` veri-koruyan yeniden kurulum |
+| F7 | **Kenar/köşe boyutlandırma** — sol (genişlik) / üst (yükseklik) / sol-üst köşe sürükle; sağ+alt kenar sabit; `ui_geom.json` kalıcı; `PANEL_W`/`ekran//2` → çalışma zamanı `self._panel_w`/`self._win_h` (bkz. [[overlay_window]]) |
+| F8 | **Sembol evreni kısıtı kaldırıldı** — `is_known` kapısı yerine biçim kontrolü; listede olmayan sembol de eklenip `BIST:<SEM>`/`<SEM>.IS` varsayılan eşlemesiyle çekilir (bkz. [[symbols]]) |
+
+---
+
+## 🔴 Canlı sorun (2026-08-13): Tweet alarmı işlevsiz — X API 402
+
+**Belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread` kırmızı sayaç) hiç dolmuyor;
+tweet akışı boş. Alarm = görsel rozet + yeni tweet vurgusu (`_tw_hl`); sesli/sistem
+bildirimi zaten yok.
+
+**Kök neden (canlı probe ile doğrulandı):** `api.twitter.com/2/tweets/search/recent`
+**HTTP 402** döndürüyor: `{"detail":"credits depleted","status":402,"title":"Payment
+Required"}`. X API v2 `search/recent` artık ücretli; hesabın **kredisi tükenmiş**.
+**Kod arızası değil** — token geçerli (114 krktr), zincir (`_twitter_poll` → 402 →
+boş poll → rozet dolmaz) beklendiği gibi çalışıyor.
+
+**İkincil:** `_twitter_poll_error` hatayı yalnız 𝕏 sekmesi AÇIKKEN status'a yazar;
+kapalıyken sessizce loglar → kullanıcı nedeni göremiyor (görünürlük iyileştirmesi
+yapılabilir ama alarmı çalıştırmaz).
+
+**Çözüm (kod dışı, kullanıcı aksiyonu):** X Developer Portal'da plan/kredi yenile,
+veya kredili bir bearer token ile
+`security add-generic-password -U -s ekranhisse -a TWITTER_BEARER_TOKEN -w '<token>'`
++ uygulamayı yeniden başlat. Bkz. [[twitter_client]].
+
+---
+
 ## Kritik / Yüksek (hâlâ açık)
 
 - ✅ Bu kategoride açık madde kalmadı (stocks.json ve PHP backend 3. turda kapandı).
@@ -118,7 +152,7 @@ last_updated: 2026-08-12
 - **`_rebuild_rows`** her mutasyonda tam rebuild — 50 hissede her etkileşimde 50 widget yeniden oluşturuluyor.
 - **`TargetBar`** sınıfı hiç örneklenmiyor — ölü kod (doğrula/kaldır).
 - **Twitter sembol sayısı** limitsiz; ~40+ sembolde 512 byte Twitter API limitini aşabilir.
-- **`TWITTER_QUERY`** env'de tanımlı ama okunmuyor — dead config (doğrula).
+- ~~`TWITTER_QUERY` env okunmuyor~~ → **çözüldü/doğrulandı (2026-08-13):** `overlay._twitter_query()` `config.TWITTER_QUERY` doluysa aynen kullanır, boşsa sembollerden üretir.
 - **TV auth token** oturum süresi dolunca yenilenmiyor (negatif cache eklendi ama pozitif TTL/refresh yok).
 - **Not editörü** karakter limiti yok; GitHub Gist 10 MB sınırı.
 - **Bölüm adında `:` karakteri** sembol ayrıştırmasını bozabiliyor (doğrula).

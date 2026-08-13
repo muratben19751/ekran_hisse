@@ -56,6 +56,7 @@ from applog import log
 from data_fetcher import fetch_all, fetch_tv_rsi_bulk
 from logic import (
     _SEP_SYMBOL,
+    compute_pnl,
     compute_unread,
     group_stocks,
     make_sep_symbol,
@@ -579,9 +580,10 @@ class StockPickerSheet(_SheetDialog):
 
 
 class TargetSheet(_SheetDialog):
-    """Giriş + çıkış hedefi tek sheet'te (result: ('save', e, x) | ('clear',) | None)."""
+    """Giriş + çıkış hedefi + adet tek sheet'te
+    (result: ('save', e, x, qty) | ('clear',) | None)."""
 
-    def __init__(self, symbol, entry=None, exit_price=None, parent=None):
+    def __init__(self, symbol, entry=None, exit_price=None, qty=None, parent=None):
         super().__init__(parent)
         head = QWidget()
         h = QHBoxLayout(head)
@@ -590,7 +592,7 @@ class TargetSheet(_SheetDialog):
         sym = QLabel(symbol)
         sym.setFont(_f(13, QFont.DemiBold))
         sym.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
-        sub = QLabel("giriş / çıkış hedefi")
+        sub = QLabel("giriş / çıkış / adet")
         sub.setFont(_f(12))
         sub.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         h.addWidget(sym)
@@ -602,10 +604,13 @@ class TargetSheet(_SheetDialog):
         fields.setSpacing(10)
         w1, self.inp_entry = self._field("Giriş", _tr(entry) if entry is not None else "")
         w2, self.inp_exit  = self._field("Çıkış", _tr(exit_price) if exit_price is not None else "")
+        w3, self.inp_qty   = self._field("Adet", _tr(qty) if qty is not None else "")
         self.inp_entry.setPlaceholderText("62,30")
         self.inp_exit.setPlaceholderText("71,00")
+        self.inp_qty.setPlaceholderText("100")
         fields.addWidget(w1)
         fields.addWidget(w2)
+        fields.addWidget(w3)
         self.lay.addLayout(fields)
 
         bar = QHBoxLayout()
@@ -628,10 +633,11 @@ class TargetSheet(_SheetDialog):
         ok.clicked.connect(self._save)
         self.inp_entry.returnPressed.connect(self._save)
         self.inp_exit.returnPressed.connect(self._save)
+        self.inp_qty.returnPressed.connect(self._save)
         cancel.clicked.connect(self.reject)
         clear.clicked.connect(self._clear)
         self.inp_entry.setFocus()
-        self._place(292, 150)
+        self._place(360, 150)
 
     # Boş girdi ile geçersiz girdiyi AYIRT etmek için sentinel: boş alan hedefi
     # bilinçli olarak temizler (None, geçerli); '71x' gibi çözümlenemeyen girdi
@@ -659,16 +665,21 @@ class TargetSheet(_SheetDialog):
     def _save(self):
         entry = self._num(self.inp_entry.text())
         exit_ = self._num(self.inp_exit.text())
+        qty   = self._num(self.inp_qty.text())
         bad_entry = entry is self._INVALID
         bad_exit = exit_ is self._INVALID
+        bad_qty = qty is self._INVALID
         self._mark_invalid(self.inp_entry, bad_entry)
         self._mark_invalid(self.inp_exit, bad_exit)
-        if bad_entry or bad_exit:
+        self._mark_invalid(self.inp_qty, bad_qty)
+        if bad_entry or bad_exit or bad_qty:
             # Geçersiz sayı: accept ETME — kullanıcı hedef koyduğunu sanıp None'a
             # düşmesin. Odağı ilk hatalı alana ver.
-            (self.inp_entry if bad_entry else self.inp_exit).setFocus()
+            first = (self.inp_entry if bad_entry else
+                     self.inp_exit if bad_exit else self.inp_qty)
+            first.setFocus()
             return
-        self.result_value = ("save", entry, exit_)
+        self.result_value = ("save", entry, exit_, qty)
         self.accept()
 
     def _clear(self):
@@ -762,12 +773,13 @@ class Sparkline(QWidget):
 
 class StockRow(QWidget):
     remove_requested = Signal(str)
-    levels_changed   = Signal(str, object, object)
+    levels_changed   = Signal(str, object, object, object)
+    move_requested   = Signal(str, int)
 
-    def __init__(self, symbol, entry=None, exit_price=None, parent=None):
+    def __init__(self, symbol, entry=None, exit_price=None, qty=None, parent=None):
         super().__init__(parent)
         self.symbol = symbol
-        self._entry, self._exit, self._price = entry, exit_price, None
+        self._entry, self._exit, self._qty, self._price = entry, exit_price, qty, None
         self._press_pos = None
         self._reached = False
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -820,6 +832,16 @@ class StockRow(QWidget):
         lay.addWidget(self.spark, 1)
         lay.addWidget(self.lbl_price)
         lay.addWidget(self.lbl_pct)
+
+        # Kâr/Zarar etiketi: giriş fiyatı girilmişse tutar (adet varsa) + yüzde.
+        # Entry yoksa gizli — mevcut sade satır görünümü korunur.
+        self.lbl_pnl = QLabel("")
+        self.lbl_pnl.setFont(_f(9, QFont.DemiBold))
+        self.lbl_pnl.setFixedWidth(_sf(96))
+        self.lbl_pnl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_pnl.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        self.lbl_pnl.setVisible(False)
+        lay.addWidget(self.lbl_pnl)
 
         self.lbl_rsi = QLabel("")
         self.lbl_rsi.setFont(_f(8))
@@ -877,6 +899,7 @@ class StockRow(QWidget):
         has = self._entry is not None and self._exit is not None
         self.dot.setVisible(has)
         self._reached = False
+        tip = ""
         if has:
             # Yön farkındalığı: çıkış hedefi girişin ÜSTündeyse (long) fiyat
             # hedefe ≥ ile, ALTındaysa (short) ≤ ile ulaşır. Eski 'price >=
@@ -891,13 +914,27 @@ class StockRow(QWidget):
                 f"background: {C_YELLOW if self._reached else C_GREEN}; border-radius: 2px;"
             )
             tip = f"Giriş {_tr(self._entry)}  ·  Çıkış {_tr(self._exit)}"
-            if self._price is not None and self._entry is not None and self._entry != 0:
-                pnl = (self._price - self._entry) / self._entry * 100
-                sign = "+" if pnl >= 0 else "−"
-                tip += f"  ·  {sign}{_tr(abs(pnl), 1)}%"
-            self.setToolTip(tip)
+
+        # Kâr/Zarar: yalnızca giriş fiyatı (exit hedefi gerekmez). Adet varsa
+        # tutar da hesaplanır (compute_pnl). Etiket satırda görünür + tooltip'e
+        # eklenir; giriş yoksa gizli.
+        amount, pct = compute_pnl(self._entry, self._price, self._qty)
+        if pct is None:
+            self.lbl_pnl.setVisible(False)
         else:
-            self.setToolTip("")
+            sign = "+" if pct >= 0 else "−"
+            color = C_GREEN if pct >= 0 else C_RED
+            if amount is not None:
+                txt = f"{sign}{_tr(abs(amount))} · {sign}%{_tr(abs(pct), 1)}"
+            else:
+                txt = f"{sign}%{_tr(abs(pct), 1)}"
+            self.lbl_pnl.setText(txt)
+            self.lbl_pnl.setStyleSheet(f"color: {color}; background: transparent;")
+            self.lbl_pnl.setVisible(True)
+            if self._entry is not None:
+                tip = (tip + "  ·  " if tip else "") + txt
+
+        self.setToolTip(tip)
         self._paint_bg()
 
     def update_data(self, price, change_pct):
@@ -956,26 +993,30 @@ class StockRow(QWidget):
         m.addAction("Hedef belirle…", self._open_target)
         m.addAction("Hedefi temizle", self._clear_target)
         m.addSeparator()
+        m.addAction("Yukarı taşı", lambda: self.move_requested.emit(self.symbol, -1))
+        m.addAction("Aşağı taşı", lambda: self.move_requested.emit(self.symbol, +1))
+        m.addSeparator()
         m.addAction("Listeden kaldır", lambda: self.remove_requested.emit(self.symbol))
         m.exec(self.mapToGlobal(pos))
 
     def _open_target(self):
-        dlg = TargetSheet(self.symbol, self._entry, self._exit, parent=self.window())
+        dlg = TargetSheet(self.symbol, self._entry, self._exit, self._qty,
+                          parent=self.window())
         dlg.exec()
         res = dlg.result_value
         if not res:
             return
         if res[0] == "clear":
-            self._entry = self._exit = None
+            self._entry = self._exit = self._qty = None
         else:
-            self._entry, self._exit = res[1], res[2]
+            self._entry, self._exit, self._qty = res[1], res[2], res[3]
         self._sync_target()
-        self.levels_changed.emit(self.symbol, self._entry, self._exit)
+        self.levels_changed.emit(self.symbol, self._entry, self._exit, self._qty)
 
     def _clear_target(self):
-        self._entry = self._exit = None
+        self._entry = self._exit = self._qty = None
         self._sync_target()
-        self.levels_changed.emit(self.symbol, None, None)
+        self.levels_changed.emit(self.symbol, None, None, None)
 
 
 class GroupHeader(QWidget):
@@ -1906,7 +1947,9 @@ class OverlayWindow(QWidget):
             self._twitter_load()   # sorgu değişti; yeni akışı çek
 
     def _twitter_token(self):
-        return config.TWITTER_BEARER_TOKEN
+        # Nitter RSS köprüsü kimlik doğrulama gerektirmez; kaynak her zaman
+        # denenir. (Eskiden X bearer token'a bakardı — artık kullanılmıyor.)
+        return True
 
     def _twitter_mark_read(self):
         self._tw_hl.clear()
@@ -2417,7 +2460,7 @@ class OverlayWindow(QWidget):
             # alınır. Böylece arama her tuşta widget yok edip yeniden kurmaz.
             for i, s in enumerate(items):
                 sym = s["symbol"]
-                row = StockRow(sym, s.get("entry"), s.get("exit"))
+                row = StockRow(sym, s.get("entry"), s.get("exit"), s.get("qty"))
                 hist = self._spark_history.get(sym)
                 if hist:
                     row.spark.restore(hist)
@@ -2426,6 +2469,7 @@ class OverlayWindow(QWidget):
                     row.update_rsi(rsi_cached)
                 row.remove_requested.connect(self._remove_stock)
                 row.levels_changed.connect(self._update_levels)
+                row.move_requested.connect(self._move_stock)
                 cv.addWidget(row)
                 self.rows[sym] = row
                 order.append((sym, row))
@@ -2595,11 +2639,12 @@ class OverlayWindow(QWidget):
         self._rebuild_rows()
         self._apply_cached_prices()
 
-    def _update_levels(self, symbol, entry, exit_price):
+    def _update_levels(self, symbol, entry, exit_price, qty=None):
         for s in self.stocks:
             if s["symbol"] == symbol:
                 s["entry"] = entry
                 s["exit"] = exit_price
+                s["qty"] = qty
                 break
         save_stocks(self.stocks)
 

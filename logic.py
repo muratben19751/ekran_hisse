@@ -195,12 +195,31 @@ def sanitize_stocks(stocks):
         if not isinstance(sym, str) or not sym.strip():
             continue
         rec = {"symbol": sym}
-        for k in ("entry", "exit"):
+        for k in ("entry", "exit", "qty"):
             if k in s:
                 v = s[k]
                 rec[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
         out.append(rec)
     return out
+
+
+def compute_pnl(entry, price, qty=None):
+    """Giriş fiyatı + güncel fiyat (+ opsiyonel adet) → (tutar, yüzde).
+
+    Döndürür `(amount, pct)`:
+      - `entry`/`price` None ya da `entry == 0` ise `(None, None)` — hesap yok.
+      - `pct` = `(price - entry) / entry * 100` (giriş+fiyat varsa her zaman).
+      - `amount` = `(price - entry) * qty` yalnızca `qty` geçerli bir sayı ve `> 0`
+        ise; aksi halde `None` (adet opsiyonel — girilmezse yalnız yüzde).
+    Long/short ayrımı yok: negatif tutar/yüzde zararı gösterir.
+    """
+    if entry is None or price is None or entry == 0:
+        return None, None
+    pct = (price - entry) / entry * 100
+    amount = None
+    if isinstance(qty, (int, float)) and not isinstance(qty, bool) and qty > 0:
+        amount = (price - entry) * qty
+    return amount, pct
 
 
 def group_stocks(stocks, sep=_SEP_SYMBOL):

@@ -6,7 +6,7 @@ sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
   - sources/03_deepr_review_round2_2026-08-12.md
-last_updated: 2026-08-12
+last_updated: 2026-08-13
 ---
 
 # Mimari Genel Bakış
@@ -54,7 +54,7 @@ TradingView WebSocket
 | `data_fetcher.py` | TV WebSocket fiyat/RSI + yfinance özel semboller; NaN/timeout korumalı |
 | [[paths]] | `~/.ekranhisse` yol politikası tek kaynak (`DATA_DIR`/`ensure_data_dir`/`data_file`) |
 | [[symbols]] | Sembol evreni tek kaynak (`symbols.json` → BIST ∪ SPECIALS = KNOWN; yf & tv eşlemesi) |
-| [[twitter_client]] | 𝕏 API ağ katmanı (UI'dan ayrık; 429 Retry-After + sınırlı retry) |
+| [[twitter_client]] | 𝕏 ağ katmanı (UI'dan ayrık; Nitter search RSS köprüsü — bearer'sız, çoklu instance fallback + 429 backoff) |
 | `notes_api_client.py` | GitHub Gist not senkronu (last-write-wins) |
 | `config.py` | Sır okuma: Keychain-öncelikli, `.env` geçiş fallback |
 | `applog.py` | Merkezî logger (konsol + `~/Library/Logs/EkranHisse.log`) |
@@ -91,11 +91,20 @@ açıkken eklenen sır süreç yeniden başlatılana dek görülmez.
 `GIST_ID` boşsa `notes_api_client._gist_api()` anında `ValueError` fırlatır — sessiz
 geçersiz URL üretilmez.
 
+`config.NITTER_INSTANCES` (2026-08-13) sır DEĞİL — public Nitter URL listesi (virgülle
+çoklu); boşsa [[twitter_client]] kod içi varsayılan listesini kullanır. Keychain/env'den
+okunabilir ama zorunlu değil.
+
 ## Kalıcılık ve yol politikası
 Tüm kalıcı veri (`stocks.json`, `tw_symbols.json`, `notes_config.env`, `.ekranhisse.lock`)
 `~/.ekranhisse` altında; yol politikası [[paths]] modülünde tek kaynak. `stocks.json`
 artık bundle Resources'a YAZILMAZ (kullanıcı verisi; `.gitignore`'da). Atomik JSON
 yazımı: tmp dosyaya yaz + `os.replace` (yazma hatasında mevcut dosya bozulmaz).
+
+`stocks.json` kaydı `{"symbol", "entry", "exit", "qty"}` (2026-08-13'te `qty`/adet
+eklendi — [[stock_row]] K/Z tutar hesabı için); `entry`/`exit`/`qty` opsiyonel.
+`logic.sanitize_stocks` dıştan gelen kaydı güvenli hale getirir (sayı değilse `None`,
+`symbol` yoksa satır düşer) — kullanıcı verisi asla silinmez.
 
 **UI tercihleri (2026-08-13):** aynı dizinde iki kalıcı UI dosyası daha:
 `ui_scale.json` (font ölçeği `_FONT_SCALE`) ve `ui_geom.json` (panel genişliği +

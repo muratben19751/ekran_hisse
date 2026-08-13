@@ -1,12 +1,14 @@
 ---
 title: Bilinen Sorunlar
 type: synthesis
-summary: EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar + teknik borç; ayrıca 2026-08-13 canlı bulgusu — tweet alarmı X API 402 "credits depleted" nedeniyle işlevsiz (hesap/plan sorunu, kod değil).
+summary: EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar + teknik borç; ayrıca 2026-08-13 tweet alarmı X API 402'den Nitter RSS köprüsüne taşındı (bearer'sız), kalan engel public Nitter instance'larının kapalı olması.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
   - sources/03_deepr_review_round2_2026-08-12.md
   - sources/04_oturum_2026-08-13.md
+  - sources/05_nitter_rss_2026-08-13.md
+  - sources/06_reorder_pnl_2026-08-13.md
 related:
   - wiki/synthesis/architecture_overview.md
 last_updated: 2026-08-13
@@ -115,29 +117,39 @@ last_updated: 2026-08-13
 | F6 | **Font ölçekleme** — başlık satırında `A−`/`A+`; `_FONT_SCALE` (0.8–1.8), `_f()`/`_sf()` ölçekler, `ui_scale.json` kalıcı, `_rebuild_all_pages` veri-koruyan yeniden kurulum |
 | F7 | **Kenar/köşe boyutlandırma** — sol (genişlik) / üst (yükseklik) / sol-üst köşe sürükle; sağ+alt kenar sabit; `ui_geom.json` kalıcı; `PANEL_W`/`ekran//2` → çalışma zamanı `self._panel_w`/`self._win_h` (bkz. [[overlay_window]]) |
 | F8 | **Sembol evreni kısıtı kaldırıldı** — `is_known` kapısı yerine biçim kontrolü; listede olmayan sembol de eklenip `BIST:<SEM>`/`<SEM>.IS` varsayılan eşlemesiyle çekilir (bkz. [[symbols]]) |
+| F9 | **Hisse taşıma menüsü** — [[stock_row]] sağ-tık "Yukarı taşı"/"Aşağı taşı" (`move_requested(sym, ±1)` → `_move_stock` index takası + `save_stocks`); mevcut sürükle-bırak korunur, menü keşfedilebilir kılar |
+| F10 | **Kâr/Zarar (tutar & %)** — `TargetSheet`'e **Adet** alanı; `logic.compute_pnl(entry, price, qty)` saf fonksiyonu; satırda yeşil/kırmızı `lbl_pnl` (giriş+adet → tutar·%, adet yok → yalnız %, giriş yok → gizli) + tooltip. `qty` `stocks.json`'a eklendi (veri korundu) |
 
 ---
 
-## 🔴 Canlı sorun (2026-08-13): Tweet alarmı işlevsiz — X API 402
+## 🟡 Tweet alarmı: X API 402 → Nitter RSS köprüsü (2026-08-13)
 
-**Belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread` kırmızı sayaç) hiç dolmuyor;
-tweet akışı boş. Alarm = görsel rozet + yeni tweet vurgusu (`_tw_hl`); sesli/sistem
-bildirimi zaten yok.
+**Özgün belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread`) hiç dolmuyor, akış
+boş. Alarm = görsel rozet + yeni tweet vurgusu (`_tw_hl`); sesli/sistem bildirimi
+zaten yok.
 
-**Kök neden (canlı probe ile doğrulandı):** `api.twitter.com/2/tweets/search/recent`
-**HTTP 402** döndürüyor: `{"detail":"credits depleted","status":402,"title":"Payment
-Required"}`. X API v2 `search/recent` artık ücretli; hesabın **kredisi tükenmiş**.
-**Kod arızası değil** — token geçerli (114 krktr), zincir (`_twitter_poll` → 402 →
-boş poll → rozet dolmaz) beklendiği gibi çalışıyor.
+**Kök neden:** `api.twitter.com/2/tweets/search/recent` **HTTP 402 "credits
+depleted"** döndürüyordu. X API v2 `search/recent` ücretli; hesap kredisi tükenmiş
+(kod değil, hesap sorunu).
 
-**İkincil:** `_twitter_poll_error` hatayı yalnız 𝕏 sekmesi AÇIKKEN status'a yazar;
-kapalıyken sessizce loglar → kullanıcı nedeni göremiyor (görünürlük iyileştirmesi
-yapılabilir ama alarmı çalıştırmaz).
+**Yapılan (kod, commit bu oturum):** kullanıcı ücretsiz çözüm istedi;
+[[twitter_client]] içi **Nitter search RSS köprüsüne** çevrildi — bearer token'a
+bağımlılık kaldırıldı, public API korundu (`overlay`/`logic`/testler değişmedi),
+`NITTER_INSTANCES` ile çoklu instance fallback eklendi. **402 tamamen gitti.**
 
-**Çözüm (kod dışı, kullanıcı aksiyonu):** X Developer Portal'da plan/kredi yenile,
-veya kredili bir bearer token ile
-`security add-generic-password -U -s ekranhisse -a TWITTER_BEARER_TOKEN -w '<token>'`
-+ uygulamayı yeniden başlat. Bkz. [[twitter_client]].
+**Kalan engel (yeni açık madde):** Canlı probe (bkz. `sources/05_nitter_rss_2026-08-13.md`)
+şu an **hiçbir public Nitter instance'ının anonim RSS vermediğini** doğruladı
+(nitter.net 403, privacydev kapalı, poast/tiekoetter bot-challenge, xcancel
+whitelist). Köprü kodu doğru ama veri akışı instance sağlığına bağlı → bugün boş.
+
+**Güvenilir ücretsiz yol:** **kendi Nitter instance'ını** (Docker + guest token)
+kurup ekle:
+`security add-generic-password -U -s ekranhisse -a NITTER_INSTANCES -w 'https://...'`
+veya `~/.ekranhisse/notes_config.env`'e `NITTER_INSTANCES=...` + restart. Bkz.
+[[twitter_client]].
+
+**İkincil (hâlâ açık):** `_twitter_poll_error` hatayı yalnız 𝕏 sekmesi AÇIKKEN
+status'a yazar; kapalıyken sessizce loglar (görünürlük iyileştirmesi yapılabilir).
 
 ---
 

@@ -89,6 +89,46 @@ def test_target_reached_short(win):
     assert r._reached is False
 
 
+# ── StockRow K/Z (compute_pnl): tutar+% etiketi, adet opsiyonel ──────────────
+def test_pnl_label_hidden_without_entry(win):
+    r = overlay.StockRow("X")
+    r.update_data(100.0, 1.0)
+    assert r.lbl_pnl.isVisibleTo(r) is False
+
+
+def test_pnl_label_pct_only_without_qty(win):
+    # Giriş var, adet yok → yalnız yüzde (tutar yok)
+    r = overlay.StockRow("X", entry=100.0)
+    r.update_data(110.0, 1.0)
+    assert r.lbl_pnl.isVisibleTo(r) is True
+    txt = r.lbl_pnl.text()
+    assert "%" in txt and "·" not in txt      # tutar-yüzde ayracı yok
+
+
+def test_pnl_label_amount_and_pct_with_qty(win):
+    # Giriş + adet → tutar · yüzde
+    r = overlay.StockRow("X", entry=100.0, qty=50)
+    r.update_data(110.0, 1.0)
+    assert r.lbl_pnl.isVisibleTo(r) is True
+    txt = r.lbl_pnl.text()
+    assert "·" in txt and "%" in txt          # hem tutar hem yüzde
+    assert txt.startswith("+")                # kâr → +
+
+
+def test_pnl_label_loss_prefix(win):
+    r = overlay.StockRow("X", entry=100.0, qty=10)
+    r.update_data(80.0, -1.0)                 # zarar
+    assert r.lbl_pnl.text().startswith("−")   # U+2212 eksi işareti
+
+
+def test_move_requested_signal_emits(win):
+    r = overlay.StockRow("X")
+    seen = []
+    r.move_requested.connect(lambda sym, d: seen.append((sym, d)))
+    r.move_requested.emit(r.symbol, -1)
+    assert seen == [("X", -1)]
+
+
 # ── _prune_tw_seen: incoming id'lerin tamamı korunur (unread invaryantı) ─────
 def test_prune_tw_seen_keeps_all_incoming(win):
     incoming = {f"in{i}" for i in range(50)}

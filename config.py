@@ -87,6 +87,9 @@ TV_SESSION_ID        = get("TV_SESSION_ID")
 # Opsiyonel override: doluysa overlay._twitter_query() bunu aynen kullanır,
 # boşsa logic.twitter_query() izlenen sembollerden üretir.
 TWITTER_QUERY        = get("TWITTER_QUERY")
+# Nitter instance'ları (virgülle çoklu). Boşsa twitter_client dahili varsayılan
+# listesini kullanır. Sır DEĞİL (public URL) — Keychain/env opsiyonel.
+NITTER_INSTANCES     = get("NITTER_INSTANCES")
 
 # Not: Bu sabitler import anında bir kez okunur. Uygulama açıkken Keychain'e/env'e
 # sır eklenirse, süreç yeniden başlatılana kadar görülmez (notes_api_client ve

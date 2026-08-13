@@ -6,6 +6,7 @@ sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
   - sources/04_oturum_2026-08-13.md
+  - sources/06_reorder_pnl_2026-08-13.md
 last_updated: 2026-08-13
 ---
 
@@ -79,12 +80,26 @@ bellek+diskten yeniden doğar).
 - Twitter poll: 60 sn
 - Outside-click fallback: 150 ms (global monitor aktifse durur)
 
+## Hisse yönetimi (hedef / adet / taşıma)
+Her [[stock_row]] sağ-tık menüsünden yönetilir:
+- **Hedef belirle…** → `TargetSheet` (giriş / çıkış / **adet**). Adet alanı
+  (2026-08-13) opsiyoneldir; girilirse `logic.compute_pnl` tutar-bazlı K/Z hesaplar.
+  Sonuç `("save", entry, exit_, qty)` → `StockRow.levels_changed(4 arg)` →
+  `OverlayWindow._update_levels` → `stocks.json` (`entry`/`exit`/`qty`).
+- **Hedefi temizle** → üçünü de `None` yapar.
+- **Yukarı/Aşağı taşı** (2026-08-13) → `StockRow.move_requested(sym, ±1)` →
+  `_move_stock`: `self.stocks` içinde komşu index takası + `save_stocks` +
+  `_rebuild_rows` + `_apply_cached_prices`. Aynı handler grup başlığı taşımasında da
+  kullanılır (DRY). Sürükle-bırak (`RowsHost.dropped` → `_on_dropped`) yöntemi de
+  korunur; menü onu keşfedilebilir kılar.
+
 ## Önemli fixler
 
 ### 2026-08-13
 - Kenar/köşe boyutlandırma + `ui_geom.json` kalıcılığı eklendi (yukarıda); `PANEL_W`/`ekran//2` sabitleri → çalışma zamanı `self._panel_w`/`self._win_h`
 - Font ölçekleme (A−/A+) + `ui_scale.json` — büyük/küçük yazı, `_rebuild_all_pages` ile veri-koruyan yeniden kurulum
 - Sembol evreni kısıtı kaldırıldı: `_add_from_search`/`StockPickerSheet` artık `is_known` kapısı yerine biçim kontrolü (`[A-Z0-9.-]`); listede olmayan sembol de eklenip varsayılan eşlemeyle (`BIST:<SEM>`/`<SEM>.IS`) çekilir
+- Hisse satırına sağ-tık **Yukarı/Aşağı taşı** + `TargetSheet`'e **Adet** alanı → satırda **kâr/zarar (tutar & %)** etiketi (bkz. yukarıda + [[stock_row]])
 
 ### 2026-08-11
 - `update_rsi`: `or` zinciri → `next(...is not None)` — NoneType/falsy-zero TypeError giderildi

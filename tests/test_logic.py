@@ -404,3 +404,59 @@ def test_group_stocks_after_sanitize_no_crash():
     groups = logic.group_stocks(logic.sanitize_stocks(raw))
     syms = [s["symbol"] for _, items in groups for s in items]
     assert syms == ["THYAO"]
+
+
+# ── sanitize_stocks: qty alanı ────────────────────────────────────────────────
+def test_sanitize_stocks_keeps_numeric_qty():
+    out = logic.sanitize_stocks([{"symbol": "X", "entry": 10.0, "exit": 20.0, "qty": 100}])
+    assert out == [{"symbol": "X", "entry": 10.0, "exit": 20.0, "qty": 100}]
+
+
+def test_sanitize_stocks_coerces_bad_qty_to_none():
+    out = logic.sanitize_stocks([{"symbol": "X", "qty": "abc"}])
+    assert out == [{"symbol": "X", "qty": None}]
+    # bool qty de anlamsız → None
+    out2 = logic.sanitize_stocks([{"symbol": "X", "qty": True}])
+    assert out2 == [{"symbol": "X", "qty": None}]
+
+
+def test_sanitize_stocks_qty_absent_not_added():
+    # qty anahtarı yoksa çıktıya eklenmez (mevcut kayıtlar bozulmaz)
+    out = logic.sanitize_stocks([{"symbol": "X", "entry": 10.0}])
+    assert out == [{"symbol": "X", "entry": 10.0}]
+
+
+# ── compute_pnl: kâr/zarar tutar + yüzde ──────────────────────────────────────
+def test_compute_pnl_none_when_missing_entry_or_price():
+    assert logic.compute_pnl(None, 100.0, 10) == (None, None)
+    assert logic.compute_pnl(100.0, None, 10) == (None, None)
+
+
+def test_compute_pnl_none_when_entry_zero():
+    # entry=0 → sıfıra bölme; güvenli (None, None)
+    assert logic.compute_pnl(0, 50.0, 10) == (None, None)
+
+
+def test_compute_pnl_pct_only_without_qty():
+    amount, pct = logic.compute_pnl(100.0, 110.0, None)
+    assert amount is None
+    assert pct == pytest.approx(10.0)
+
+
+def test_compute_pnl_amount_with_qty():
+    amount, pct = logic.compute_pnl(100.0, 110.0, 50)
+    assert amount == pytest.approx(500.0)      # (110-100)*50
+    assert pct == pytest.approx(10.0)
+
+
+def test_compute_pnl_loss_is_negative():
+    amount, pct = logic.compute_pnl(100.0, 80.0, 10)
+    assert amount == pytest.approx(-200.0)
+    assert pct == pytest.approx(-20.0)
+
+
+def test_compute_pnl_ignores_nonpositive_or_bool_qty():
+    # qty <= 0 ya da bool → tutar hesaplanmaz, yüzde durur
+    assert logic.compute_pnl(100.0, 110.0, 0)[0] is None
+    assert logic.compute_pnl(100.0, 110.0, -5)[0] is None
+    assert logic.compute_pnl(100.0, 110.0, True)[0] is None

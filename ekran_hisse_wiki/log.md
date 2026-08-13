@@ -96,3 +96,59 @@ vurgu; kod çalışıyor ama X API 402 kredi tükenmesi nedeniyle akış boş. K
 
 **Lint (sonrası):** backlinks 9 sayfa + index yenilendi; broken_links/orphans/
 missing_summary/missing_frontmatter/stale/stubs = 0.
+
+---
+
+## 2026-08-13 (2) — Twitter/X → Nitter RSS köprüsü senkronu
+
+**Yeni kaynak:** `sources/05_nitter_rss_2026-08-13.md` (Nitter köprüsü + canlı instance probe, immutable).
+
+**Kod (bu oturum):** `twitter_client.py` içi X API v2 (402) yerine **Nitter search RSS**'e
+çevrildi; `fetch_recent`/`fetch_ids` + `(data,err)` sözleşmesi korundu (overlay/logic/testler
+değişmedi). `config.NITTER_INSTANCES` (sır değil, çoklu fallback), `overlay._twitter_token()`
+→ `True`. 12 twitter testi + toplam 215 test yeşil; `stocks.json` md5 değişmedi (veri korundu).
+
+**Wiki güncellemeleri:**
+- twitter_client: X API v2 402 açıklaması → Nitter RSS köprüsü (`_instances`/`_clean_query`/
+  `_fetch_rss`/`_parse_item`, çoklu instance fallback, 429 backoff); canlı "public instance'lar
+  kapalı" durumu.
+- known_issues: 🔴 402 bölümü → 🟡 "Nitter RSS köprüsüne taşındı" (402 gitti); kalan engel =
+  public Nitter instance'larının kapalı olması (kendi instance önerisi).
+- architecture_overview: modül haritası twitter_client satırı Nitter RSS'e güncellendi;
+  `NITTER_INSTANCES` config notu eklendi.
+
+**Çelişki/boşluk kapatma:** yeni açık madde — public Nitter instance'ları anonim RSS
+vermiyor (nitter.net 403, privacydev kapalı, poast/tiekoetter bot-challenge, xcancel
+whitelist). Köprü kodu doğru; veri akışı instance sağlığına bağlı. Güvenilir ücretsiz yol:
+kendi Nitter instance'ı (Docker) + `NITTER_INSTANCES`.
+
+**Lint (sonrası):** backlinks 9 sayfa + index yenilendi; broken_links/orphans/
+missing_summary/missing_frontmatter/stale/stubs = 0.
+
+---
+
+## 2026-08-13 (3) — Hisse taşıma menüsü + Kâr/Zarar (tutar & %) senkronu
+
+**Yeni kaynak:** `sources/06_reorder_pnl_2026-08-13.md` (taşıma + K/Z oturumu, immutable).
+
+**Kod (bu oturum):** `logic.py` — `sanitize_stocks`'a `qty` + yeni saf fonksiyon
+`compute_pnl(entry, price, qty)→(amount, pct)`. `overlay.py` — `TargetSheet`'e **Adet**
+alanı (`_save` 4'lü tuple); `StockRow` yeni `move_requested(str,int)` sinyali + sağ-tık
+"Yukarı/Aşağı taşı", `levels_changed` 4-arg (qty), yeni `lbl_pnl` etiketi (`_sync_target`
+→ `compute_pnl`); `OverlayWindow._rebuild_rows` qty + `move_requested.connect(_move_stock)`,
+`_update_levels` qty. 230 test yeşil (215+15); `stocks.json` md5 değişmedi (veri korundu).
+
+**Wiki güncellemeleri:**
+- stock_row: bayat `reorder_started` → `move_requested`; layout'a K/Z(96px) sütunu;
+  yeni "Kâr/Zarar etiketi" + "hedef/adet" bölümleri; `levels_changed` 4-arg.
+- overlay_window: yeni "Hisse yönetimi (hedef/adet/taşıma)" bölümü; `TargetSheet` Adet;
+  2026-08-13 fix satırı; source 06.
+- known_issues: F9 (taşıma menüsü) + F10 (K/Z tutar&%) eklendi; source 06.
+- architecture_overview: `stocks.json` şemasına `qty` + `sanitize_stocks` güvence notu.
+
+**Çelişki/boşluk kapatma:** `stock_row.md`'deki `reorder_started` sinyali koddan
+kalkmıştı (artık `move_requested`) — gerçeğe çekildi. K/Z yalnız tooltip'te %'ydi;
+artık satırda tutar+% görünür (compute_pnl merkezî).
+
+**Lint (sonrası):** backlinks + index yeniden üretilecek; hedef broken_links/orphans/
+missing_summary/missing_frontmatter/stale/stubs = 0.

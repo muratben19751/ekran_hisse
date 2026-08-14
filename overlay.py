@@ -64,7 +64,7 @@ import paths
 import symbols as sym_universe
 import twitter_client
 from applog import log
-from data_fetcher import fetch_all, fetch_tv_rsi_bulk
+from data_fetcher import fetch_all, fetch_tv_history, fetch_tv_rsi_bulk
 from logic import (
     _SEP_SYMBOL,
     compute_pnl,
@@ -778,9 +778,39 @@ class Sparkline(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._points = []
+        self._has_history = False   # TV gerçek bar serisiyle mi tohumlandı?
 
     def restore(self, points):
-        self._points = list(points)[-self.MAX:]
+        """Gerçek intraday bar close serisini yükle (grafiği tohumlar).
+
+        _spark_history'den (kalıcı) veya TV fetch_tv_history'den (gün-içi
+        barlar) gelen listeyi kurar. Boş/yetersiz veri gelirse mevcut noktalar
+        korunur (grafiği boşaltmayız)."""
+        pts = [
+            v for v in (points or [])
+            if v is not None and not (isinstance(v, float) and math.isnan(v))
+        ]
+        if not pts:
+            return
+        self._points = pts[-self.MAX:]
+        self._has_history = True
+        self.update()
+
+    def set_live(self, price):
+        """Canlı fiyatı (60sn'de bir gelen lp) grafiğe işle.
+
+        Gerçek bar geçmişi varsa (restore ile tohumlandıysa) SON noktayı bu
+        anlık fiyatla GÜNCELLER — pencere kaymaz, TV barlarıyla hizalı kalır ve
+        son nokta her zaman güncel fiyatı gösterir. Geçmiş yoksa (ör. TV history
+        boş döndü) eski davranışa düşer: yeni nokta ekle (kayan pencere)."""
+        if price is None or (isinstance(price, float) and math.isnan(price)):
+            return
+        if self._has_history and self._points:
+            self._points[-1] = price
+        else:
+            self._points.append(price)
+            if len(self._points) > self.MAX:
+                self._points = self._points[-self.MAX:]
         self.update()
 
     def push(self, price):
@@ -1075,8 +1105,8 @@ class StockRow(QWidget):
         # Sparkline'ı change_pct'ten BAĞIMSIZ, fiyat geldiğinde güncelle: TV
         # paketinde chp None gelip price dolu olabilir ({price, change_pct:None});
         # push'u yüzde dalına bağlamak bu sembolde grafiği kalıcı boş bırakırdı.
-        # push zaten None/NaN-guard'lı.
-        self.spark.push(price)
+        # set_live gerçek bar geçmişi varsa son barı günceller, yoksa nokta ekler.
+        self.spark.set_live(price)
         self._sync_target()
 
     # sürükle-bırak ------------------------------------------------------
@@ -1282,6 +1312,9 @@ class OverlayWindow(QWidget):
     # thread'de kapanıyor; eskiden bu bayrak worker'ın finally'sinde cross-thread
     # yazılıyordu — projenin kendi thread-safety kuralını kıran tek istisnaydı.)
     rsi_done = Signal()
+    # Sparkline gün-içi bar geçmişi worker sonucu (arka plan thread) → ana
+    # thread'de {SYM: [close,...]} restore. TV WS çağrısı ana thread'i bloklamaz.
+    hist_result = Signal(object)
 
     def __init__(self, signals):
         super().__init__()
@@ -1390,11 +1423,19 @@ class OverlayWindow(QWidget):
         self.tw_poll_error.connect(self._twitter_poll_error)
         self.tw_load_result.connect(self._twitter_load_apply)
         self.rsi_done.connect(self._on_rsi_done)
+        self.hist_result.connect(self._on_hist_result)
 
         self._rsi_timer = QTimer(self)
         self._rsi_timer.timeout.connect(self._rsi_refresh)
         self._rsi_timer.start(300_000)  # 5 dakikada bir
         QTimer.singleShot(3000, self._rsi_refresh)  # ilk yüklemede 3sn sonra başlat
+
+        # Sparkline gün-içi bar geçmişi (5dk × 24 bar = son ~2 saat). Açılışta
+        # bir kez + her 5dk TV'den tazele; canlı fiyat (60sn) son barı günceller.
+        self._hist_timer = QTimer(self)
+        self._hist_timer.timeout.connect(self._hist_refresh)
+        self._hist_timer.start(300_000)  # 5 dakikada bir
+        QTimer.singleShot(1500, self._hist_refresh)  # ilk yüklemede erken doldur
 
         # stocks.json açılışta okunamadıysa (bozuk/OSError) save bloklandı;
         # kullanıcıyı bir kez uyar ki değişikliklerinin neden kaydedilmediğini
@@ -2480,6 +2521,7 @@ class OverlayWindow(QWidget):
             if mode == 1 and prev != 1:
                 self._stocks_refresh()
                 QTimer.singleShot(1500, self._rsi_refresh)
+                QTimer.singleShot(700, self._hist_refresh)
             if mode == 2 and prev != 2:
                 self._notes_load()
             if mode == 3 and prev != 3:
@@ -2880,6 +2922,48 @@ class OverlayWindow(QWidget):
     def _on_rsi_done(self):
         """Ana thread — RSI worker bitti, re-entrancy kilidini bırak."""
         self._rsi_fetching = False
+
+    def _hist_refresh(self):
+        """Sparkline için gün-içi bar geçmişini TV'den çek (arka plan thread)."""
+        if self._mode != 1:
+            return
+        syms = [
+            s["symbol"] for s in self.stocks
+            if not s["symbol"].startswith(_SEP_SYMBOL)
+        ]
+        if not syms:
+            return
+        if getattr(self, "_hist_fetching", False):
+            return
+        self._hist_fetching = True
+
+        def _fetch():
+            out = {}
+            try:
+                try:
+                    out = fetch_tv_history(syms, interval=5, bars=Sparkline.MAX)
+                except Exception as e:
+                    log.warning("Sparkline geçmiş çekim hatası: %s", e)
+                    out = {}
+            finally:
+                # Sonucu ana thread'e taşı (widget'lara oradan dokun).
+                self.hist_result.emit(out or {})
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _on_hist_result(self, out):
+        """Ana thread — gün-içi bar close serilerini sparkline'lara bas."""
+        self._hist_fetching = False
+        if not isinstance(out, dict):
+            return
+        for sym, row in self.rows.items():
+            closes = out.get(sym.upper())
+            if not closes:
+                continue
+            sp = getattr(row, "spark", None)
+            if sp is not None:
+                sp.restore(closes)
+                # Rebuild'ler arası korunsun (F6/F7 rebuild _spark_history okur).
+                self._spark_history[sym] = list(sp._points)
 
     def apply_rsi(self, symbol, rsi):
         self._rsi_cache[symbol] = rsi

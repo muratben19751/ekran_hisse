@@ -462,3 +462,45 @@ def test_save_geom_touches_only_geom_file(app, tmp_path, monkeypatch):
     overlay.save_geom(360, 500)
     assert written == [str(tmp_path / "ui_geom.json")]
 
+
+# ── Sparkline: gerçek bar geçmişi + canlı fiyat semantiği ────────────────────
+def test_sparkline_restore_seeds_history(app):
+    sp = overlay.Sparkline()
+    sp.restore([10, 11, 12, 11.5, 13])
+    assert sp._has_history is True
+    assert sp._points == [10, 11, 12, 11.5, 13]
+
+
+def test_sparkline_restore_ignores_empty_and_nan(app):
+    sp = overlay.Sparkline()
+    sp.restore([1, 2, 3])
+    sp.restore([])                     # boş → mevcut korunur
+    assert sp._points == [1, 2, 3]
+    sp.restore([float("nan"), None])   # tüm değerler geçersiz → korunur
+    assert sp._points == [1, 2, 3]
+
+
+def test_sparkline_setlive_updates_last_bar_when_seeded(app):
+    sp = overlay.Sparkline()
+    sp.restore([10, 11, 12])
+    n = len(sp._points)
+    sp.set_live(99.0)
+    assert len(sp._points) == n       # pencere kaymadı
+    assert sp._points[-1] == 99.0     # son bar güncellendi
+
+
+def test_sparkline_setlive_appends_without_history(app):
+    sp = overlay.Sparkline()
+    sp.set_live(5.0)
+    sp.set_live(6.0)
+    assert sp._has_history is False
+    assert sp._points == [5.0, 6.0]   # geçmiş yok → kayan pencere (fallback)
+
+
+def test_sparkline_setlive_guards_none_nan(app):
+    sp = overlay.Sparkline()
+    sp.restore([10, 11, 12])
+    sp.set_live(None)
+    sp.set_live(float("nan"))
+    assert sp._points == [10, 11, 12]  # None/NaN yok sayıldı
+

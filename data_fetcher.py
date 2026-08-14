@@ -373,6 +373,123 @@ def _fetch_tv_rsi_bulk_once(symbols: list, intervals: list = None) -> dict:
     return results
 
 
+def fetch_tv_history(symbols: list, interval: int = 5, bars: int = 24) -> dict:
+    """Sparkline için gün-içi close serisi çeker (TEK WS bağlantısı).
+
+    Her sembol için tek bir chart series açar (verilen `interval` dakikada,
+    `bars` adet bar) ve son `bars` kadar kapanış fiyatını döndürür:
+    {SEMBOL_UPPER: [close_eski, ..., close_yeni]} (kronolojik, en yeni sonda).
+    Veri yoksa/hata olursa o sembol boş liste ([]) döner.
+
+    RSI ile aynı create_series altyapısını kullanır ama _calc_rsi yerine ham
+    close dizisini verir; grafiği gerçek intraday barlarla besler.
+    """
+    tv_iv = _TV_INTERVALS.get(interval, "5")
+    bars = max(2, min(int(bars), 500))
+    syms = list(dict.fromkeys(s.upper() for s in symbols))
+    if not syms:
+        return {}
+
+    results = {s: [] for s in syms}
+    cs = _rand_id("cs_")
+
+    series_map = {}       # sid -> SYM
+    sym_slot = {}         # SYM -> "sym0", ...
+    for i, s in enumerate(syms):
+        sym_slot[s] = f"sym{i}"
+        series_map[f"{sym_slot[s]}_h"] = s
+
+    pending = set(series_map.keys())
+    done = threading.Event()
+    ws_ref = [None]
+    lock = threading.Lock()
+
+    def on_open(ws):
+        ws_ref[0] = ws
+        token = _get_tv_auth_token()
+        ws.send(_wrap({"m": "set_auth_token", "p": [token]}))
+        ws.send(_wrap({"m": "chart_create_session", "p": [cs, ""]}))
+        for s in syms:
+            slot = sym_slot[s]
+            ws.send(_wrap({"m": "resolve_symbol", "p": [
+                cs, slot, f'={{"symbol":"{sym_universe.tv_symbol(s)}","adjustment":"splits"}}'
+            ]}))
+            sid = f"{slot}_h"
+            ws.send(_wrap({"m": "create_series", "p": [
+                cs, sid, sid, slot, tv_iv, bars
+            ]}))
+
+    def _finish(sid):
+        with lock:
+            pending.discard(sid)
+            if not pending:
+                done.set()
+
+    def on_message(ws, message):
+        for raw in _parse_packets(message):
+            if raw.startswith("~h~"):
+                ws.send(f"~m~{len(raw)}~m~{raw}")
+                continue
+            try:
+                pkt = json.loads(raw)
+            except Exception:
+                continue
+            m = pkt.get("m")
+            p = pkt.get("p", [])
+
+            if m == "timescale_update" and len(p) >= 2 and isinstance(p[1], dict):
+                for sid, block in p[1].items():
+                    s = series_map.get(sid)
+                    if s is None or not isinstance(block, dict):
+                        continue
+                    bars_data = block.get("s", [])
+                    # NaN barları at (tatil/eksik veri); v[4] = close.
+                    closes = [
+                        b["v"][4] for b in bars_data
+                        if len(b.get("v", [])) >= 5
+                        and b["v"][4] is not None
+                        and not (isinstance(b["v"][4], float) and math.isnan(b["v"][4]))
+                    ]
+                    if closes:
+                        results[s] = closes[-bars:]
+
+            elif m == "series_completed" and len(p) >= 2:
+                sid = p[1] if p[1] in series_map else (p[2] if len(p) >= 3 and p[2] in series_map else None)
+                if sid:
+                    _finish(sid)
+
+            elif m in ("series_error", "symbol_error"):
+                for token in p:
+                    if isinstance(token, str) and token in series_map:
+                        _finish(token)
+
+            elif m == "critical_error":
+                log.warning("TV history critical_error: %s", p)
+                done.set()
+
+    threading.Thread(
+        target=lambda: websocket.WebSocketApp(
+            TV_WS_URL,
+            header={"Origin": "https://www.tradingview.com"},
+            on_open=on_open,
+            on_message=on_message,
+            on_error=lambda ws, e: (log.warning("TV history WS hatası: %s", e), done.set()),
+            on_close=lambda ws, *_: done.set(),
+        ).run_forever(
+            ping_interval=_WS_PING_INTERVAL, ping_timeout=_WS_PING_TIMEOUT
+        ),
+        daemon=True
+    ).start()
+
+    done.wait(timeout=25)
+    if ws_ref[0]:
+        try:
+            ws_ref[0].close()
+        except Exception:
+            pass
+    return results
+
+
 def fetch_all(symbols: list, callback) -> None:
     """Fiyatları çeker; bittiğinde callback(list[dict]) çağrılır.
 

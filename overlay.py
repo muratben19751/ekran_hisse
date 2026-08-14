@@ -2515,9 +2515,16 @@ class OverlayWindow(QWidget):
     def _twitter_poll_apply(self, incoming):
         """Ana thread — poll sonucunu state'e uygula (thread-safe)."""
         # Başarılı poll: backoff'u tabana sıfırla.
+        recovered = bool(self._tw_poll_fail_streak)
         if self._tw_poll_fail_streak:
             self._tw_poll_fail_streak = 0
             self._twitter_poll_timer.setInterval(self._tw_poll_base_ms)
+        # Panel boşsa (ör. önceki hata sonrası temizlendi) poll yalnızca id
+        # taşır, metin taşımaz → panel boş kalırdı. Hata sonrası ilk başarılı
+        # poll'de tam yüklemeyi tetikle ki panel tweet METNİYLE toparlansın.
+        if recovered and not self._tw_tweets and not getattr(self, "_tw_loading", False):
+            self._twitter_load()
+            return
         new_ids, self._tw_seen = compute_unread(
             incoming, self._tw_seen, active=(self._mode == 3))
         self._prune_tw_seen(incoming)

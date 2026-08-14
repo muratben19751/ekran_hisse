@@ -211,3 +211,16 @@ Backlinks 9 sayfada tazelendi, index yeniden üretildi.
 - **Doğrulama:** `ruff check overlay.py` temiz; `pytest -q` → 284 passed; bundle senkron (cmp -s), app restart.
 - **Güncellenen Layer 2:** overlay_window (Sürükleme + Kenar/köşe boyutlandırma bölümlerine üst-kenar devri fix'i, RESIZE_MARGIN 6→8), architecture_overview (Sürükleme→"Sürükleme + dikey boyutlandırma"), known_issues (F7'ye fix notu).
 - Backlinks 9 sayfada tazelendi, index yeniden üretildi.
+
+## 2026-08-14 — Tweet akışı: RSSHub keyword route çöktü → user-timeline köprüsü
+- **Belirti:** 𝕏 paneli boş, durum "hata 503", poll her 60sn başarısız.
+- **Teşhis (canlı probe):** RSSHub container ayakta (port 1200), `/twitter/keyword/*` → 503; RSSHub logu `Twitter API error: 404` (X arama GraphQL endpoint'i 404). Token GEÇERLİ: `/twitter/user/elonmusk` → 200. İki token + `diygod/rsshub:latest` ile de keyword bozuk. **Kök neden: keyword (arama) route X tarafında bozuk, token ölümü değil.**
+- **Çözüm (twitter_client.py):** keyword-search → **user-timeline** modeli. `_DEFAULT_ACCOUNTS` sabit finans hesapları (`config.TWITTER_ACCOUNTS` ile override), `/twitter/user/<handle>?showRetweets=0` paralel çekilir; `_symbols_from_query`+`_matches_symbols` ile izlenen sembollere göre süzülür (`#SASA`/`$TCELL` kelime sınırı). `_parse_item` author fallback: handle link'ten, ad `<author>`'dan. 503→"X oturumu geçersiz (token yenile)". Public API (`fetch_recent`/`fetch_ids`) korundu → overlay/logic değişmedi.
+- **overlay.py:** `_twitter_poll_apply` hata sonrası ilk başarılı poll'de panel boşsa tam `_twitter_load` tetikler (metinle otomatik toparlanma).
+- **config.py:** `TWITTER_ACCOUNTS` anahtarı eklendi.
+- **Hesap seçimi (ampirik):** RSSHub bazı hesapların yıllar önceki cache'ini veriyor (borsainsan→2021, hisseanalizi→2017); güncel+ticker hesaplar seçildi (isyatirim/ziraatyatirim/oyakyatirim/fintables/borsagundem).
+- **RSSHub container:** `docker run ... --restart unless-stopped` (eskisi `restart:no` → reboot'ta ölüyordu).
+- **Doğrulama:** `ruff check` temiz; `pytest -q` → 292 passed (test_twitter_client user-timeline modeline yeniden yazıldı, 26 test); canlı RSSHub'a karşı güncel+sembol-filtreli tweet döndü.
+- **Kaynak:** `sources/11_rsshub_user_timeline_2026-08-14.md` (immutable).
+- **Güncellenen Layer 2:** twitter_client (Nitter→user-timeline tam yeniden yazım + veri kaynağı evrimi + hesap seçimi), architecture_overview (twitter_client satırı + TWITTER_ACCOUNTS config), known_issues (tweet bölümü 🟡→✅ çözüldü, teknik-borç satırı güncellendi).
+- Backlinks 9 sayfada tazelendi, index yeniden üretildi. Lint temiz (hepsi 0).

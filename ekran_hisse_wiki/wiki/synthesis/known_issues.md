@@ -10,6 +10,7 @@ sources:
   - sources/05_nitter_rss_2026-08-13.md
   - sources/06_reorder_pnl_2026-08-13.md
   - sources/08_deepr_review_round4_2026-08-14.md
+  - sources/11_rsshub_user_timeline_2026-08-14.md
 related:
   - wiki/synthesis/architecture_overview.md
 last_updated: 2026-08-14
@@ -154,29 +155,32 @@ God-module ve `_rebuild_rows` O(n) yüksek regresyon riskli refactor; ertelendi.
 
 ---
 
-## 🟡 Tweet alarmı: X API 402 → Nitter RSS köprüsü (2026-08-13)**Özgün belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread`) hiç dolmuyor, akış
+## ✅ Tweet alarmı: X API 402 → Nitter → RSSHub keyword → RSSHub user-timeline (2026-08-14 çözüldü)
+**Özgün belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread`) hiç dolmuyor, akış
 boş. Alarm = görsel rozet + yeni tweet vurgusu (`_tw_hl`); sesli/sistem bildirimi
 zaten yok.
 
-**Kök neden:** `api.twitter.com/2/tweets/search/recent` **HTTP 402 "credits
-depleted"** döndürüyordu. X API v2 `search/recent` ücretli; hesap kredisi tükenmiş
-(kod değil, hesap sorunu).
+**Evrim:**
+1. `api.twitter.com/2/tweets/search/recent` **HTTP 402 "credits depleted"** (X API v2 ücretli).
+2. **Nitter search RSS** — public instance ekosistemi çöktü (403/kapalı/anti-bot).
+3. **RSSHub keyword route** (self-hosted, `config.RSSHUB_URL`) — 402 gitti.
+4. **RSSHub keyword route X'te bozuldu** (2026-08-14): `/twitter/keyword/*` → **503**,
+   RSSHub logu `Twitter API error: 404` (X arama GraphQL endpoint'i 404). Token
+   GEÇERLİ (`/twitter/user/*` → 200); iki token + `:latest` imaj ile de bozuk.
 
-**Yapılan (kod, commit bu oturum):** kullanıcı ücretsiz çözüm istedi;
-[[twitter_client]] içi **Nitter search RSS köprüsüne** çevrildi — bearer token'a
-bağımlılık kaldırıldı, public API korundu (`overlay`/`logic`/testler değişmedi),
-`NITTER_INSTANCES` ile çoklu instance fallback eklendi. **402 tamamen gitti.**
+**Çözüm (commit bu oturum):** [[twitter_client]] içi **user-timeline** modeline
+çevrildi — sabit finans hesaplarının (`isyatirim`/`ziraatyatirim`/`oyakyatirim`/
+`fintables`/`borsagundem`) timeline'ları paralel çekilir, izlenen sembollere göre
+(`#SASA`/`$TCELL` kelime sınırı) süzülür. Public API korundu (`overlay`/`logic`/
+testler değişmedi). `config.TWITTER_ACCOUNTS` ile override edilebilir. HTTP 503 →
+"X oturumu geçersiz (RSSHub token'ı yenile)" mesajı. overlay `_twitter_poll_apply`
+hata sonrası ilk başarılı poll'de panel boşsa tam `_twitter_load` tetikler
+(metinle otomatik toparlanma). Canlı doğrulandı (güncel + sembol-filtreli tweet).
 
-**Kalan engel (yeni açık madde):** Canlı probe (bkz. `sources/05_nitter_rss_2026-08-13.md`)
-şu an **hiçbir public Nitter instance'ının anonim RSS vermediğini** doğruladı
-(nitter.net 403, privacydev kapalı, poast/tiekoetter bot-challenge, xcancel
-whitelist). Köprü kodu doğru ama veri akışı instance sağlığına bağlı → bugün boş.
-
-**Güvenilir ücretsiz yol:** **kendi Nitter instance'ını** (Docker + guest token)
-kurup ekle:
-`security add-generic-password -U -s ekranhisse -a NITTER_INSTANCES -w 'https://...'`
-veya `~/.ekranhisse/notes_config.env`'e `NITTER_INSTANCES=...` + restart. Bkz.
-[[twitter_client]].
+**Sınırlama (belgeli):** user-timeline, canlı keyword-search kadar zengin değil —
+yalnız seçili hesapların ticker geçen tweet'leri görünür. RSSHub bazı hesapların
+yıllar önceki cache'ini verir (`borsainsan`→2021 vb.) → yalnız aktif hesap seç.
+Bkz. `sources/11_rsshub_user_timeline_2026-08-14.md`, [[twitter_client]].
 
 **İkincil (hâlâ açık):** `_twitter_poll_error` hatayı yalnız 𝕏 sekmesi AÇIKKEN
 status'a yazar; kapalıyken sessizce loglar (görünürlük iyileştirmesi yapılabilir).
@@ -194,7 +198,7 @@ status'a yazar; kapalıyken sessizce loglar (görünürlük iyileştirmesi yapı
 - **Teknik borç — `overlay.py` God-module (2883 satır):** kalıcılık (load/save_stocks, _save_json, geom/scale G/Ç) + UI + thread/timer orkestrasyonu + macOS köprüsü aynı dosyada. `test_stocks_io` Qt'siz çalışamıyor. **4. turda kullanıcı "dokunma, teknik borç kaydet" dedi** (yüksek regresyon riski). Öneri: kalıcılık katmanı ayrı `storage.py`'ye çıkarılabilir.
 - **Teknik borç — `_rebuild_rows` O(n):** her yapısal mutasyonda (ekle/sil/taşı/yeniden-adlandır) tüm widget'lar deleteLater + sıfırdan kurulur. Düşük şiddet (veri kaybı yok, küçük listede önemsiz); arama filtresi zaten `setVisible` ile kaçınıyor. Ertelendi (Qt yaşam-döngüsü tuzakları riskli).
 - **`TargetBar`** sınıfı hiç örneklenmiyor — ölü kod (doğrula/kaldır).
-- **Twitter sembol sayısı** limitsiz; ~40+ sembolde RSSHub keyword sorgusu şişebilir (artık paralel çekiliyor ama sembol başına ayrı istek).
+- **Twitter kapsam sınırı**: user-timeline modelinde yalnız seçili hesapların ticker geçen tweet'leri görünür (keyword-search kadar zengin değil). İstek sayısı hesapla sabit (sembolle artmaz); sembol filtresi client-tarafı. `config.TWITTER_ACCOUNTS` ile genişletilebilir.
 - **Not editörü** karakter limiti yok; GitHub Gist 10 MB sınırı.
 - **Çok cihaz not senkronu** last-write-wins — eşzamanlı düzenlemede kayıp (belgeli, çözülmedi). Not silme artık onay ister (G57) ama çok-cihaz merge yok.
 

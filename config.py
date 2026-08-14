@@ -86,10 +86,15 @@ TV_SESSION_ID        = get("TV_SESSION_ID")
 # Opsiyonel override: doluysa overlay._twitter_query() bunu aynen kullanır,
 # boşsa logic.twitter_query() izlenen sembollerden üretir.
 TWITTER_QUERY        = get("TWITTER_QUERY")
-# RSSHub köprü tabanı (𝕏/Twitter keyword akışı). Boşsa http://localhost:1200
+# RSSHub köprü tabanı (𝕏/Twitter user-timeline akışı). Boşsa http://localhost:1200
 # varsayılır. Sır DEĞİL (public/yerel URL) — Keychain/env opsiyonel. RSSHub'ın
 # TWITTER_AUTH_TOKEN'ı RSSHub tarafında ayarlanır, EkranHisse'de tutulmaz.
 RSSHUB_URL           = get("RSSHUB_URL")
+# İzlenecek X finans/borsa hesapları (virgülle handle listesi, ör.
+# "borsagundem,bloomberght"). Boşsa twitter_client'taki varsayılan set kullanılır.
+# keyword (arama) route'u X tarafında bozuk olduğu için tweet'ler bu hesapların
+# timeline'larından çekilip izlenen sembollere göre süzülür.
+TWITTER_ACCOUNTS     = get("TWITTER_ACCOUNTS")
 # DEPRECATED: Nitter köprüsü kaldırıldı (ekosistem çöktü). Anahtar geriye uyum
 # için okunuyor ama artık kullanılmıyor; RSSHUB_URL kullanın.
 NITTER_INSTANCES     = get("NITTER_INSTANCES")

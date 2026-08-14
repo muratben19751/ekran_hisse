@@ -57,7 +57,7 @@ TradingView WebSocket
 | `data_fetcher.py` | TV WebSocket fiyat/RSI + yfinance özel semboller; NaN/timeout korumalı |
 | [[paths]] | `~/.ekranhisse` yol politikası tek kaynak (`DATA_DIR`/`ensure_data_dir`/`data_file`) |
 | [[symbols]] | Sembol evreni tek kaynak (`symbols.json` → BIST ∪ SPECIALS = KNOWN + US_SYMBOLS; yf & tv eşlemesi, ABD hisseleri 2026-08-14) |
-| [[twitter_client]] | 𝕏 ağ katmanı (UI'dan ayrık; self-hosted RSSHub keyword köprüsü — 2026-08-13'te Nitter'dan geçildi; sembol başına istek + 429 backoff) |
+| [[twitter_client]] | 𝕏 ağ katmanı (UI'dan ayrık; self-hosted RSSHub **user-timeline** köprüsü — 2026-08-14'te keyword route X'te bozulunca geçildi; sabit hesaplar paralel çekilir, izlenen sembollere göre süzülür + 429 backoff) |
 | `notes_api_client.py` | GitHub Gist not senkronu (last-write-wins) |
 | `config.py` | Sır okuma: Keychain-öncelikli, `.env` geçiş fallback |
 | `applog.py` | Merkezî logger (konsol + `~/Library/Logs/EkranHisse.log`) |
@@ -100,7 +100,9 @@ geçersiz URL üretilmez.
 
 `config.RSSHUB_URL` (2026-08-13) sır DEĞİL — self-hosted RSSHub köprü tabanı; boşsa
 [[twitter_client]] `http://localhost:1200` varsayar. RSSHub'ın `TWITTER_AUTH_TOKEN`'ı
-RSSHub tarafında tutulur, EkranHisse'de saklanmaz. Eski `config.NITTER_INSTANCES`
+RSSHub tarafında tutulur, EkranHisse'de saklanmaz. `config.TWITTER_ACCOUNTS`
+(2026-08-14) sır DEĞİL — izlenecek 𝕏 handle listesi (virgülle); boşsa
+[[twitter_client]] sabit varsayılan seti kullanır. Eski `config.NITTER_INSTANCES`
 DEPRECATED (Nitter ekosistemi çöktü); geriye uyum için okunuyor ama kullanılmıyor.
 
 ## Kalıcılık ve yol politikası

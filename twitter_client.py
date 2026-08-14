@@ -1,11 +1,14 @@
-"""EkranHisse — Twitter/X istemcisi (RSSHub keyword köprüsü, ağ katmanı).
+"""EkranHisse — Twitter/X istemcisi (RSSHub user-timeline köprüsü, ağ katmanı).
 
-X API v2 `search/recent` ücretli (kredi bitince HTTP 402) ve Nitter ekosistemi
-çöktü (instance'lar 403/kapalı/anti-bot). Bu modül aynı public arayüzü koruyarak
-veriyi **self-hosted RSSHub** `/twitter/keyword/<terim>` route'undan (RSS XML)
-çeker. RSSHub, X `auth_token` cookie'siyle (RSSHub tarafında `TWITTER_AUTH_TOKEN`)
-gerçek keyword search yapar; EkranHisse sır tutmaz. overlay/logic ve callback
-sözleşmesi değişmez:
+X API v2 `search/recent` ücretli (kredi bitince HTTP 402), Nitter ekosistemi
+çöktü, ve RSSHub `keyword` (search) route'u da X tarafında bozuldu (X arama
+GraphQL endpoint'i `404` → RSSHub `503`). Bu modül aynı public arayüzü koruyarak
+veriyi **self-hosted RSSHub** `/twitter/user/<handle>` route'undan (RSS XML)
+çeker — user-timeline route'u çalışıyor (200). Sabit bir finans/borsa hesap
+listesinin timeline'ları çekilir, gelen tweet'ler İZLENEN SEMBOLLERE göre
+filtrelenir. RSSHub, X `auth_token` cookie'siyle (RSSHub tarafında
+`TWITTER_AUTH_TOKEN`) gerçek timeline çeker; EkranHisse sır tutmaz. overlay/logic
+ve callback sözleşmesi değişmez:
 
 fetch_recent(query, callback)  → callback((tweets, users, err))
 fetch_ids(query, callback)     → callback((ids_set, err))
@@ -14,8 +17,9 @@ tweets: [{"id","text","created_at","author_id"}]  (created_at ISO8601)
 users:  {author_id: {"username","name"}}
 
 RSSHub tabanı config.RSSHUB_URL ile verilir (boşsa http://localhost:1200).
-İzlenen birden çok sembol için her sembole ayrı istek atılır; sonuçlar birleşir,
-id ile tekilleşir, tarihe göre sıralanır. HTTP 429'da Retry-After'a saygı gösterilir.
+İzlenen hesapların her biri için ayrı istek atılır; sonuçlar birleşir, id ile
+tekilleşir, sorgudaki sembollerden en az birini içeren tweet'lere süzülür,
+tarihe göre sıralanır. HTTP 429'da Retry-After'a saygı gösterilir.
 """
 
 import html
@@ -35,14 +39,33 @@ from applog import log
 # RSSHub tabanı config'ten okunmazsa yerel Docker varsayılanı.
 _DEFAULT_RSSHUB = "http://localhost:1200"
 
+# İzlenecek X finans/borsa hesapları. config.TWITTER_ACCOUNTS (virgülle handle
+# listesi) doluysa onu kullan; boşsa bu GÜNCEL + ticker-içeren Türk borsa hesabı
+# seti. '@' ve boşluk temizlenir. keyword (arama) route'u X tarafında bozuk
+# olduğu için tweet'ler bu hesapların timeline'larından gelir, sonra izlenen
+# sembollere göre süzülür. Seçim kriteri: (1) hâlâ aktif tweet atıyor (RSSHub
+# bazı hesapların yıllar önceki cache'ini verir — ör. borsainsan 2021'de kalmış,
+# işe yaramaz), (2) tweet'lerinde ticker (#SEMBOL/$SEMBOL) geçiyor (makro-haber
+# ağırlıklı hesaplar sembol filtresinden geçmez). Aracı kurum hesapları
+# (bilanço/öneri) ve borsagundem düzenli ticker kullanır.
+_DEFAULT_ACCOUNTS = [
+    "isyatirim",
+    "ziraatyatirim",
+    "oyakyatirim",
+    "fintables",
+    "borsagundem",
+]
+
 _MAX_RETRIES = 2          # bir istekte 429 sonrası en fazla bu kadar tekrar
 _MAX_BACKOFF = 30         # Retry-After'ı bu saniyeyle sınırla (UI'yı kilitleme)
-_TIMEOUT = 10
-_MAX_WORKERS = 6          # keyword istekleri için eşzamanlı thread üst sınırı
+_TIMEOUT = 15
+_MAX_WORKERS = 6          # timeline istekleri için eşzamanlı thread üst sınırı
 
-# X-özel arama operatörleri (keyword route yok sayar) — sorgudan sıyır.
+# X-özel arama operatörleri (sorgudan sembol çıkarırken yok say) — sıyır.
 _X_OPERATOR_RE = re.compile(r"(?:^|\s)-?(?:lang|is|filter):\S+", re.IGNORECASE)
 _STATUS_ID_RE = re.compile(r"/status/(\d+)")
+# Tweet link'inden handle: twitter.com/<handle>/status/... veya x.com/<handle>/...
+_HANDLE_RE = re.compile(r"(?:twitter|x)\.com/([^/]+)/status/", re.IGNORECASE)
 
 
 def _rsshub_base():
@@ -51,39 +74,60 @@ def _rsshub_base():
     return (raw or _DEFAULT_RSSHUB).rstrip("/")
 
 
-def _keyword_from_query(query):
-    """X-stili sorgudan RSSHub keyword terim listesi çıkar.
+def _accounts():
+    """İzlenecek X handle listesi: config.TWITTER_ACCOUNTS varsa o, yoksa varsayılan."""
+    raw = (getattr(config, "TWITTER_ACCOUNTS", "") or "").strip()
+    if raw:
+        out = [h.strip().lstrip("@") for h in raw.split(",")]
+        return [h for h in out if h]
+    return list(_DEFAULT_ACCOUNTS)
 
-    logic.twitter_query() '(THYAO OR AKBNK) lang:tr -is:retweet' üretir; RSSHub
-    keyword route bu operatörleri anlamaz. lang:/is:/filter: operatörlerini,
-    parantezleri ve 'OR' ayracını sıyırıp geriye kalan terimleri döndür. Hiç
-    terim kalmazsa (güvenli fallback) sorgunun tamamını tek terim say.
+
+def _symbols_from_query(query):
+    """X-stili sorgudan izlenen sembol listesini çıkar (tweet filtresi için).
+
+    logic.twitter_query() '(THYAO OR AKBNK) lang:tr -is:retweet' üretir. Filtre
+    için sadece sembol terimleri gerekir: operatörleri, parantezleri ve 'OR'
+    ayracını sıyırıp geriye kalan terimleri (yinelemesiz) büyük harfle döndür.
     """
     cleaned = _X_OPERATOR_RE.sub(" ", query)
     cleaned = cleaned.replace("(", " ").replace(")", " ")
-    terms = [t for t in cleaned.split() if t and t.upper() != "OR"]
-    if terms:
-        # yinelemesiz, sırayı koru
-        seen = set()
-        out = []
-        for t in terms:
-            if t not in seen:
-                seen.add(t)
-                out.append(t)
-        return out
-    stripped = query.strip()
-    return [stripped] if stripped else []
+    seen = set()
+    out = []
+    for t in cleaned.split():
+        u = t.upper()
+        if u and u != "OR" and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
-def _fetch_one(keyword):
-    """Tek keyword için RSSHub'a istek at; (items, err) döndür.
+def _matches_symbols(text, symbols):
+    """text (büyük harf) izlenen sembollerden en az birini kelime sınırıyla içerir mi?
+
+    symbols boşsa (sembol yok) True — filtre uygulanmaz. Kelime sınırı: sembolün
+    öncesi/sonrası harf-rakam OLMAMALI ('THYAO' 'THYAOX' ile eşleşmesin).
+    """
+    if not symbols:
+        return True
+    for s in symbols:
+        # (?<![A-Z0-9])SYM(?![A-Z0-9]) — logic._sym_regex ile aynı mantık
+        m = re.search(rf"(?<![A-Z0-9]){re.escape(s)}(?![A-Z0-9])", text)
+        if m:
+            return True
+    return False
+
+
+def _fetch_one(handle):
+    """Tek hesap için RSSHub user-timeline'ına istek at; (items, err) döndür.
 
     items = ElementTree <item> düğümleri. err None ise başarılı. 429'da
     Retry-After'a (cap'li) saygı gösterip aynı istekte _MAX_RETRIES kez dener.
     """
     base = _rsshub_base()
-    q = urllib.parse.quote(keyword)
-    url = f"{base}/twitter/keyword/{q}"
+    q = urllib.parse.quote(handle)
+    # showRetweets=0: retweet'leri ele (eski '-is:retweet' niyetini korur).
+    url = f"{base}/twitter/user/{q}?showRetweets=0"
     for attempt in range(_MAX_RETRIES + 1):
         try:
             req = urllib.request.Request(
@@ -104,20 +148,26 @@ def _fetch_one(keyword):
                 except ValueError:
                     wait = 5
                 log.info("RSSHub 429 (%s); %ss bekleniyor (deneme %d)",
-                         keyword, wait, attempt + 1)
+                         handle, wait, attempt + 1)
                 time.sleep(wait)
                 continue
-            log.warning("RSSHub HTTP hatası (%s): %s", keyword, e.code)
-            return None, "rate-limit" if e.code == 429 else f"hata {e.code}"
+            log.warning("RSSHub HTTP hatası (%s): %s", handle, e.code)
+            if e.code == 429:
+                return None, "rate-limit"
+            # 503: RSSHub ayakta ama X'ten veri gelmedi — token geçersiz/expire
+            # (RSSHub içeride X'ten 404/401 alıp 503'e çeviriyor).
+            if e.code == 503:
+                return None, "X oturumu geçersiz (RSSHub token'ı yenile)"
+            return None, f"hata {e.code}"
         except ET.ParseError as e:
-            log.warning("RSSHub RSS parse hatası (%s): %s", keyword, e)
+            log.warning("RSSHub RSS parse hatası (%s): %s", handle, e)
             return None, "geçersiz yanıt"
         except (urllib.error.URLError, OSError) as e:
             # localhost kapalı / bağlantı reddi → RSSHub çalışmıyor olabilir.
-            log.warning("RSSHub'a ulaşılamadı (%s): %s", keyword, e)
+            log.warning("RSSHub'a ulaşılamadı (%s): %s", handle, e)
             return None, "RSSHub kapalı"
         except Exception as e:
-            log.warning("RSSHub isteği başarısız (%s): %s", keyword, e)
+            log.warning("RSSHub isteği başarısız (%s): %s", handle, e)
             return None, "ağ hatası"
     # Buraya yalnızca son denemede 429+continue ile döngü tükenirse düşülür;
     # pratikte son iterasyonda 429 dalı return'e girer, yine de savunma amaçlı.
@@ -125,27 +175,28 @@ def _fetch_one(keyword):
 
 
 def _fetch_items(query):
-    """Sorgudaki her sembol için RSSHub'ı çek; birleşik (items, err) döndür.
+    """İzlenen her hesap için RSSHub user-timeline'ını çek; birleşik (items, err).
 
-    Her keyword ayrı thread'de PARALEL çekilir (sıralı değil): K sembolde
-    toplam süre ~max(istek) seviyesinde kalır, K×gecikme'ye çıkmaz. En az bir
-    sembol başarılıysa kısmi sonuç döner (err None). Tüm semboller düşerse
-    (None, son_hata). Sıralama/tekilleştirme çağıran (fetch_recent/fetch_ids)
-    tarafından _parse_item sonrası yapılır.
+    Her hesap ayrı thread'de PARALEL çekilir (sıralı değil): K hesapta toplam
+    süre ~max(istek) seviyesinde kalır, K×gecikme'ye çıkmaz. En az bir hesap
+    başarılıysa kısmi sonuç döner (err None). Tüm hesaplar düşerse
+    (None, son_hata). Sembol filtresi/tekilleştirme/sıralama çağıran tarafından
+    _parse_item sonrası yapılır. query yalnızca hesap listesi seçiminde değil,
+    çağıran katmanda sembol filtresi için kullanılır (buradan geçirilmez).
     """
-    keywords = _keyword_from_query(query)
-    if not keywords:
+    handles = _accounts()
+    if not handles:
         return None, "kaynak yok"
     all_items = []
     last_err = "kaynak yok"
     any_ok = False
-    # Eşzamanlılığı sembol sayısıyla sınırla (tek sembolde thread havuzu kurma).
-    workers = min(len(keywords), _MAX_WORKERS)
+    # Eşzamanlılığı hesap sayısıyla sınırla (tek hesapta thread havuzu kurma).
+    workers = min(len(handles), _MAX_WORKERS)
     if workers <= 1:
-        results = [_fetch_one(kw) for kw in keywords]
+        results = [_fetch_one(h) for h in handles]
     else:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(_fetch_one, keywords))
+            results = list(ex.map(_fetch_one, handles))
     for items, err in results:
         if err is None:
             any_ok = True
@@ -174,8 +225,10 @@ def _parse_item(item):
     """RSS <item> → (tweet_dict, username, name).
 
     tweet_dict: {"id","text","created_at","author_id"}. author_id = username
-    (RSSHub dc:creator handle'ıdır; ayrı numeric id yok). created_at ISO8601
-    (tw_ago bunu parse eder; zaman dilimsiz gelebilir).
+    (handle; ayrı numeric id yok). created_at ISO8601 (tw_ago bunu parse eder;
+    zaman dilimsiz gelebilir). user-timeline route'unda dc:creator olmayabilir;
+    handle o zaman tweet link'inden (twitter.com/<handle>/status/...) çıkarılır,
+    görünen ad <author>'dan alınır.
     """
     link = _text(item, "link") or _text(item, "guid")
     m = _STATUS_ID_RE.search(link)
@@ -194,10 +247,16 @@ def _parse_item(item):
         except (TypeError, ValueError):
             created = ""
 
-    # username: dc:creator ('@handle') öncelikli; yoksa boş.
+    # username (handle): dc:creator ('@handle') öncelikli; yoksa link'ten çıkar.
+    # user-timeline route dc:creator vermeyebiliyor → handle link'ten gelir.
     creator = _text(item, "dc:creator") or _text(item, "creator")
     username = creator.lstrip("@").strip()
-    name = username
+    if not username:
+        hm = _HANDLE_RE.search(link)
+        if hm:
+            username = hm.group(1)
+    # görünen ad: <author> (display-name) varsa o, yoksa handle.
+    name = _text(item, "author").strip() or username
 
     tweet = {
         "id": tid,
@@ -211,19 +270,24 @@ def _parse_item(item):
 def fetch_recent(query, callback):
     """Son tweet'leri (metin+kullanıcı) çeker. callback((tweets, users, err)).
 
-    Çoklu sembolde birleşik akış id ile tekilleşir ve created_at'e göre azalan
-    sıralanır (boş created_at'ler sona).
+    İzlenen hesapların timeline'ları birleşir; sorgudaki sembollerden en az
+    birini içeren tweet'lere süzülür (sorguda sembol yoksa süzme yapılmaz),
+    id ile tekilleşir ve created_at'e göre azalan sıralanır (boş created_at'ler
+    sona).
     """
     def _run():
         items, err = _fetch_items(query)
         if err is not None:
             callback(([], {}, err))
             return
+        symbols = _symbols_from_query(query)
         tweets = []
         users = {}
         seen_ids = set()
         for it in items:
             tw, username, name = _parse_item(it)
+            if not _matches_symbols(tw["text"].upper(), symbols):
+                continue
             tid = tw["id"]
             if tid and tid in seen_ids:
                 continue
@@ -238,15 +302,23 @@ def fetch_recent(query, callback):
 
 
 def fetch_ids(query, callback):
-    """Sadece tweet id'lerini çeker (poll için ucuz). callback((ids_set, err))."""
+    """Sadece tweet id'lerini çeker (poll için ucuz). callback((ids_set, err)).
+
+    fetch_recent ile aynı sembol filtresi uygulanır; aksi halde poll'de gelen
+    id'ler ile fetch_recent'in gösterdiği tweet'ler uyuşmaz ve okunmamış sayacı
+    şişerdi.
+    """
     def _run():
         items, err = _fetch_items(query)
         if err is not None:
             callback((set(), err))
             return
+        symbols = _symbols_from_query(query)
         ids = set()
         for it in items:
             tw, _u, _n = _parse_item(it)
+            if not _matches_symbols(tw["text"].upper(), symbols):
+                continue
             if tw["id"]:
                 ids.add(tw["id"])
         callback((ids, None))

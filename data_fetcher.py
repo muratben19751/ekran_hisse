@@ -2,8 +2,11 @@
 
 Sembol → servis eşlemeleri `symbols` modülünden (symbols.json) gelir; burada
 tekrar tutulmaz. Fiyatlar TV WS ile toplu çekilir; özel semboller (FX/altın/
-endeks/kripto) yfinance ile. RSI tek bir WS bağlantısında tüm semboller için
-toplu resolve + create_series ile alınır (sembol başına ayrı bağlantı yok).
+endeks/kripto) yfinance ile. RSI ve sparkline geçmişi TV WS ile çekilir; TV
+hesabının eşzamanlı-seri kotası düşük olabildiğinden (tek session'da aynı anda
+tek create_series) seriler tek bağlantıda SIRAYLA açılıp remove_series ile
+kapatılarak akıtılır (_stream_tv_series); böylece 'exceed limit of series in the
+session' hatası oluşmaz.
 
 Not (bilinen optimizasyon fırsatı): fetch_tv_prices/fetch_tv_rsi_bulk her
 periyodik yenilemede (fiyat 60sn, RSI 300sn) yeni bir WS bağlantısı açıp
@@ -244,11 +247,173 @@ def _calc_rsi(closes: list, period: int = 14):
     return round(100 - 100 / (1 + rs), 1)
 
 
-def fetch_tv_rsi_bulk(symbols: list, intervals: list = None) -> dict:
-    """Tüm semboller için RSI'yı TEK WS bağlantısında toplu çeker.
+def _stream_tv_series(specs: list, on_closes, timeout: float = 40.0) -> None:
+    """TEK WS bağlantısında serileri SIRAYLA açıp kapatarak veri akıtır.
 
-    Her (sembol, interval) için ayrı bir chart series açar; hepsi aynı bağlantıda
-    paralel resolve edilir. Döndürür: {SEMBOL_UPPER: {interval: rsi|None}}.
+    TV hesabının eşzamanlı-seri kotası düşük olabilir (gözlemlenen: tek session'da
+    aynı anda yalnız 1 create_series; ikincisi 'exceed limit of series in the
+    session' ile reddedilir). Bu yüzden seriler paralel DEĞİL, sıralı açılır:
+    bir seri için resolve_symbol + create_series gönderilir; timescale_update
+    ile close'lar toplanır; series_completed/series_error gelince o seri
+    remove_series ile kapatılır ve BİR SONRAKİ seri açılır. Böylece herhangi bir
+    anda tek seri açık kalır → kota hiç aşılmaz. Handshake/auth yalnız bir kez
+    ödenir (istek-başı ayrı bağlantıdan çok daha ucuz).
+
+    specs: [(key, tv_symbol, tv_iv, bars)] — key sonuçları tanımlar (çağıran'a
+    özel), tv_symbol resolve edilir, tv_iv TV interval kodu (str), bars istenen
+    bar sayısı. on_closes(key, closes) her seri için ham close listesiyle (boş
+    olabilir) TAM BİR KEZ çağrılır (seri tamam ya da hata). Sıra korunur.
+    """
+    if not specs:
+        return
+    cs = _rand_id("cs_")
+    done = threading.Event()
+    ws_ref = [None]
+    # cur_sid: o an açık serinin sid'i (on_message bununla eşleştirir). Her seri
+    # BENZERSİZ slot/sid alır: remove_series seriyi kaldırır ama resolve edilen
+    # sembol slotu session'da kalır; aynı slot adını ikinci kez resolve etmek TV'de
+    # 'duplicate id' hatası verir. idx'e bağlı taze isim bunu önler.
+    state = {"idx": -1, "advancing": False, "cur_sid": None}
+    lock = threading.Lock()
+    closes_acc = {}                      # idx -> toplanan close listesi
+
+    def _names(idx):
+        return f"sym{idx}", f"s{idx}"    # (slot, sid)
+
+    def _emit(idx):
+        """idx'inci serinin sonucunu on_closes'a ver (bir kez)."""
+        key = specs[idx][0]
+        try:
+            on_closes(key, closes_acc.get(idx, []))
+        except Exception as e:
+            log.warning("TV stream on_closes hatası (%s): %s", key, e)
+
+    def _open_next(ws):
+        """Bir sonraki seriyi aç; hepsi bittiyse done.set().
+
+        NOT: ws.send çağrıları KİLİT DIŞINDA yapılır. Bir soket implementasyonu
+        send'i senkron işleyip on_message'ı aynı thread'de yeniden çağırabilir;
+        kilit içinde send etmek reentrant kilitlenmeye yol açardı (Lock reentrant
+        değil). Kilit yalnız paylaşılan state'i (idx/closes_acc/cur_sid) korur.
+        """
+        with lock:
+            idx = state["idx"] + 1
+            if idx >= len(specs):
+                finished = True
+            else:
+                state["idx"] = idx
+                slot, sid = _names(idx)
+                state["cur_sid"] = sid
+                closes_acc[idx] = []
+                finished = False
+        if finished:
+            done.set()
+            return
+        _key, tv_sym, tv_iv, bars = specs[idx]
+        ws.send(_wrap({"m": "resolve_symbol", "p": [
+            cs, slot, f'={{"symbol":"{tv_sym}","adjustment":"splits"}}'
+        ]}))
+        ws.send(_wrap({"m": "create_series", "p": [
+            cs, sid, sid, slot, tv_iv, bars
+        ]}))
+
+    def _advance(ws):
+        """Açık seriyi kapat, sonucunu yay, sonrakine geç.
+
+        Aynı seri için birden fazla tamamlanma sinyali (series_completed +
+        series_error) gelebilir; _advancing bayrağı ile yalnız ilki işlenir
+        (çift ilerleme → seri atlama olmaz). Tüm ws.send'ler kilit dışında.
+        """
+        with lock:
+            idx = state["idx"]
+            if idx < 0 or state["advancing"]:
+                return
+            state["advancing"] = True
+            _slot, sid = _names(idx)
+        ws.send(_wrap({"m": "remove_series", "p": [cs, sid]}))
+        _emit(idx)
+        with lock:
+            state["advancing"] = False
+        _open_next(ws)
+
+    def on_open(ws):
+        ws_ref[0] = ws
+        token = _get_tv_auth_token()
+        ws.send(_wrap({"m": "set_auth_token", "p": [token]}))
+        ws.send(_wrap({"m": "chart_create_session", "p": [cs, ""]}))
+        _open_next(ws)
+
+    def on_message(ws, message):
+        for raw in _parse_packets(message):
+            if raw.startswith("~h~"):
+                ws.send(f"~m~{len(raw)}~m~{raw}")
+                continue
+            try:
+                pkt = json.loads(raw)
+            except Exception:
+                continue
+            m = pkt.get("m")
+            p = pkt.get("p", [])
+            cur_sid = state["cur_sid"]
+
+            if m == "timescale_update" and len(p) >= 2 and isinstance(p[1], dict):
+                block = p[1].get(cur_sid)
+                if isinstance(block, dict):
+                    bars_data = block.get("s", [])
+                    # NaN barları at (tatil/eksik veri); v[4] = close.
+                    closes = [
+                        b["v"][4] for b in bars_data
+                        if len(b.get("v", [])) >= 5
+                        and b["v"][4] is not None
+                        and not (isinstance(b["v"][4], float) and math.isnan(b["v"][4]))
+                    ]
+                    if closes:
+                        with lock:
+                            closes_acc[state["idx"]] = closes
+
+            elif m == "series_completed" and len(p) >= 2:
+                if cur_sid in p:
+                    _advance(ws)
+
+            elif m in ("series_error", "symbol_error"):
+                # Bu seri çözülemedi → boş sonuçla sonrakine geç (takılma yok).
+                if any(t == cur_sid for t in p if isinstance(t, str)):
+                    _advance(ws)
+
+            elif m == "critical_error":
+                # Beklenmedik hesap-düzeyi hata: kalanları da terk et.
+                log.warning("TV stream critical_error: %s", p)
+                done.set()
+
+    threading.Thread(
+        target=lambda: websocket.WebSocketApp(
+            TV_WS_URL,
+            header={"Origin": "https://www.tradingview.com"},
+            on_open=on_open,
+            on_message=on_message,
+            on_error=lambda ws, e: (log.warning("TV stream WS hatası: %s", e), done.set()),
+            on_close=lambda ws, *_: done.set(),
+        ).run_forever(
+            ping_interval=_WS_PING_INTERVAL, ping_timeout=_WS_PING_TIMEOUT
+        ),
+        daemon=True
+    ).start()
+
+    done.wait(timeout=timeout)
+    if ws_ref[0]:
+        try:
+            ws_ref[0].close()
+        except Exception:
+            pass
+
+
+def fetch_tv_rsi_bulk(symbols: list, intervals: list = None) -> dict:
+    """Tüm semboller için RSI'yı çeker (tek WS'te sıralı seri akışı).
+
+    Her (sembol, interval) için bir chart series gerekir; TV hesabının eşzamanlı
+    seri kotası düşük olduğundan seriler _stream_tv_series ile TEK bağlantıda
+    SIRAYLA açılıp kapatılır (bkz. o fonksiyon). Döndürür:
+    {SEMBOL_UPPER: {interval: rsi|None}}.
 
     Tüm sonuçlar None ise (olası: expire auth token → WS reddi) token cache'i bir
     kez invalide edilip yeniden denenir.
@@ -273,116 +438,28 @@ def _fetch_tv_rsi_bulk_once(symbols: list, intervals: list = None) -> dict:
         return {s: {iv: None for iv in intervals} for s in syms}
 
     results = {s: {iv: None for iv in intervals} for s in syms}
-    cs = _rand_id("cs_")
+    # (sembol, interval) sırasıyla seri özellikleri; key = (SYM, iv).
+    specs = [
+        ((s, iv), sym_universe.tv_symbol(s), _TV_INTERVALS[iv], _RSI_WARMUP_BARS)
+        for s in syms for iv in intervals
+    ]
 
-    # series_id → (symbol, interval); sembol → tanıtıcı (resolve adı)
-    series_map = {}       # sid -> (SYM, iv)
-    sym_slot = {}         # SYM -> "sym0", "sym1", ...
-    for i, s in enumerate(syms):
-        sym_slot[s] = f"sym{i}"
-    for s in syms:
-        for iv in intervals:
-            series_map[f"{sym_slot[s]}_{iv}"] = (s, iv)
+    def _on_closes(key, closes):
+        s, iv = key
+        if closes:
+            results[s][iv] = _calc_rsi(closes)
 
-    pending = set(series_map.keys())   # tamamlanmayı bekleyen seriler
-    done = threading.Event()
-    ws_ref = [None]
-    lock = threading.Lock()
-
-    def on_open(ws):
-        ws_ref[0] = ws
-        token = _get_tv_auth_token()
-        ws.send(_wrap({"m": "set_auth_token", "p": [token]}))
-        ws.send(_wrap({"m": "chart_create_session", "p": [cs, ""]}))
-        for s in syms:
-            slot = sym_slot[s]
-            ws.send(_wrap({"m": "resolve_symbol", "p": [
-                cs, slot, f'={{"symbol":"{sym_universe.tv_symbol(s)}","adjustment":"splits"}}'
-            ]}))
-            for iv in intervals:
-                sid = f"{slot}_{iv}"
-                ws.send(_wrap({"m": "create_series", "p": [
-                    cs, sid, sid, slot, _TV_INTERVALS[iv], _RSI_WARMUP_BARS
-                ]}))
-
-    def _finish(sid):
-        with lock:
-            pending.discard(sid)
-            if not pending:
-                done.set()
-
-    def on_message(ws, message):
-        for raw in _parse_packets(message):
-            if raw.startswith("~h~"):
-                ws.send(f"~m~{len(raw)}~m~{raw}")
-                continue
-            try:
-                pkt = json.loads(raw)
-            except Exception:
-                continue
-            m = pkt.get("m")
-            p = pkt.get("p", [])
-
-            if m == "timescale_update" and len(p) >= 2 and isinstance(p[1], dict):
-                for sid, block in p[1].items():
-                    entry = series_map.get(sid)
-                    if entry is None or not isinstance(block, dict):
-                        continue
-                    s, iv = entry
-                    bars = block.get("s", [])
-                    closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
-                    if closes:
-                        results[s][iv] = _calc_rsi(closes)
-
-            elif m == "series_completed" and len(p) >= 2:
-                # p = [cs, series_id, 'streaming', ...] veya [cs, series_id]
-                sid = p[1] if p[1] in series_map else (p[2] if len(p) >= 3 and p[2] in series_map else None)
-                if sid:
-                    _finish(sid)
-
-            elif m in ("series_error", "symbol_error"):
-                # Bu seriyi(leri) beklemeyi bırak; hangileri olduğu p içinde
-                for token in p:
-                    if isinstance(token, str) and token in series_map:
-                        _finish(token)
-
-            elif m == "critical_error":
-                log.warning("TV RSI critical_error: %s", p)
-                done.set()
-
-    threading.Thread(
-        target=lambda: websocket.WebSocketApp(
-            TV_WS_URL,
-            header={"Origin": "https://www.tradingview.com"},
-            on_open=on_open,
-            on_message=on_message,
-            on_error=lambda ws, e: (log.warning("TV RSI WS hatası: %s", e), done.set()),
-            on_close=lambda ws, *_: done.set(),
-        ).run_forever(
-            ping_interval=_WS_PING_INTERVAL, ping_timeout=_WS_PING_TIMEOUT
-        ),
-        daemon=True
-    ).start()
-
-    done.wait(timeout=25)
-    if ws_ref[0]:
-        try:
-            ws_ref[0].close()
-        except Exception:
-            pass
+    _stream_tv_series(specs, _on_closes)
     return results
 
 
 def fetch_tv_history(symbols: list, interval: int = 5, bars: int = 24) -> dict:
-    """Sparkline için gün-içi close serisi çeker (TEK WS bağlantısı).
+    """Sparkline için gün-içi close serisi çeker (tek WS'te sıralı seri akışı).
 
-    Her sembol için tek bir chart series açar (verilen `interval` dakikada,
-    `bars` adet bar) ve son `bars` kadar kapanış fiyatını döndürür:
-    {SEMBOL_UPPER: [close_eski, ..., close_yeni]} (kronolojik, en yeni sonda).
-    Veri yoksa/hata olursa o sembol boş liste ([]) döner.
-
-    RSI ile aynı create_series altyapısını kullanır ama _calc_rsi yerine ham
-    close dizisini verir; grafiği gerçek intraday barlarla besler.
+    Her sembol için bir chart series gerekir; TV hesabının eşzamanlı seri kotası
+    düşük olduğundan seriler _stream_tv_series ile TEK bağlantıda SIRAYLA açılıp
+    kapatılır. Döndürür: {SEMBOL_UPPER: [close_eski, ..., close_yeni]}
+    (kronolojik). Veri yoksa/hata olursa o sembol boş liste ([]) döner.
     """
     tv_iv = _TV_INTERVALS.get(interval, "5")
     bars = max(2, min(int(bars), 500))
@@ -391,102 +468,13 @@ def fetch_tv_history(symbols: list, interval: int = 5, bars: int = 24) -> dict:
         return {}
 
     results = {s: [] for s in syms}
-    cs = _rand_id("cs_")
+    specs = [(s, sym_universe.tv_symbol(s), tv_iv, bars) for s in syms]
 
-    series_map = {}       # sid -> SYM
-    sym_slot = {}         # SYM -> "sym0", ...
-    for i, s in enumerate(syms):
-        sym_slot[s] = f"sym{i}"
-        series_map[f"{sym_slot[s]}_h"] = s
+    def _on_closes(key, closes):
+        if closes:
+            results[key] = closes[-bars:]
 
-    pending = set(series_map.keys())
-    done = threading.Event()
-    ws_ref = [None]
-    lock = threading.Lock()
-
-    def on_open(ws):
-        ws_ref[0] = ws
-        token = _get_tv_auth_token()
-        ws.send(_wrap({"m": "set_auth_token", "p": [token]}))
-        ws.send(_wrap({"m": "chart_create_session", "p": [cs, ""]}))
-        for s in syms:
-            slot = sym_slot[s]
-            ws.send(_wrap({"m": "resolve_symbol", "p": [
-                cs, slot, f'={{"symbol":"{sym_universe.tv_symbol(s)}","adjustment":"splits"}}'
-            ]}))
-            sid = f"{slot}_h"
-            ws.send(_wrap({"m": "create_series", "p": [
-                cs, sid, sid, slot, tv_iv, bars
-            ]}))
-
-    def _finish(sid):
-        with lock:
-            pending.discard(sid)
-            if not pending:
-                done.set()
-
-    def on_message(ws, message):
-        for raw in _parse_packets(message):
-            if raw.startswith("~h~"):
-                ws.send(f"~m~{len(raw)}~m~{raw}")
-                continue
-            try:
-                pkt = json.loads(raw)
-            except Exception:
-                continue
-            m = pkt.get("m")
-            p = pkt.get("p", [])
-
-            if m == "timescale_update" and len(p) >= 2 and isinstance(p[1], dict):
-                for sid, block in p[1].items():
-                    s = series_map.get(sid)
-                    if s is None or not isinstance(block, dict):
-                        continue
-                    bars_data = block.get("s", [])
-                    # NaN barları at (tatil/eksik veri); v[4] = close.
-                    closes = [
-                        b["v"][4] for b in bars_data
-                        if len(b.get("v", [])) >= 5
-                        and b["v"][4] is not None
-                        and not (isinstance(b["v"][4], float) and math.isnan(b["v"][4]))
-                    ]
-                    if closes:
-                        results[s] = closes[-bars:]
-
-            elif m == "series_completed" and len(p) >= 2:
-                sid = p[1] if p[1] in series_map else (p[2] if len(p) >= 3 and p[2] in series_map else None)
-                if sid:
-                    _finish(sid)
-
-            elif m in ("series_error", "symbol_error"):
-                for token in p:
-                    if isinstance(token, str) and token in series_map:
-                        _finish(token)
-
-            elif m == "critical_error":
-                log.warning("TV history critical_error: %s", p)
-                done.set()
-
-    threading.Thread(
-        target=lambda: websocket.WebSocketApp(
-            TV_WS_URL,
-            header={"Origin": "https://www.tradingview.com"},
-            on_open=on_open,
-            on_message=on_message,
-            on_error=lambda ws, e: (log.warning("TV history WS hatası: %s", e), done.set()),
-            on_close=lambda ws, *_: done.set(),
-        ).run_forever(
-            ping_interval=_WS_PING_INTERVAL, ping_timeout=_WS_PING_TIMEOUT
-        ),
-        daemon=True
-    ).start()
-
-    done.wait(timeout=25)
-    if ws_ref[0]:
-        try:
-            ws_ref[0].close()
-        except Exception:
-            pass
+    _stream_tv_series(specs, _on_closes)
     return results
 
 

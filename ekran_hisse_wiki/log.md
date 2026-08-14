@@ -224,3 +224,20 @@ Backlinks 9 sayfada tazelendi, index yeniden üretildi.
 - **Kaynak:** `sources/11_rsshub_user_timeline_2026-08-14.md` (immutable).
 - **Güncellenen Layer 2:** twitter_client (Nitter→user-timeline tam yeniden yazım + veri kaynağı evrimi + hesap seçimi), architecture_overview (twitter_client satırı + TWITTER_ACCOUNTS config), known_issues (tweet bölümü 🟡→✅ çözüldü, teknik-borç satırı güncellendi).
 - Backlinks 9 sayfada tazelendi, index yeniden üretildi. Lint temiz (hepsi 0).
+
+## 2026-08-14 — TV seri limiti / sıralı seri akışı
+- **Kaynak:** `sources/12_tv_seri_limiti_sirali_akis_2026-08-14.md` (yeni, immutable).
+- **Sorun:** RSI/sparkline boş; TV `exceed limit of series in the session`. Canlı
+  probe: hesabın eşzamanlı-seri kotası ≈1 (tek session'da 2. `create_series`
+  reddediliyor). Tweet'le ilgisiz — TV veri katmanı.
+- **Çözüm:** `data_fetcher._stream_tv_series` — seriler tek WS'te SIRALI açılır,
+  `remove_series` ile kapatılıp sonraki açılır (kota hiç aşılmaz). İki tuzak:
+  benzersiz slot/sid (`duplicate id` önlemi) + ws.send kilit dışında (reentrant
+  kilitlenme önlemi). `fetch_tv_rsi_bulk`/`fetch_tv_history` public API korundu.
+- **Güncellenen sayfalar:** [[data_fetcher]] (motor + fetch_* + TV Auth notu),
+  [[known_issues]] (yeni ✅ bölüm), [[architecture_overview]] (modül haritası satırı).
+- **Doğrulama:** pytest 299 passed (+7 sıralı-akış testi), ruff temiz; canlı 12/12
+  RSI serisi + 3/3 sparkline dolu, hatasız; app yeni kodla açıldı (log'da 0 hata);
+  .app bundle senkron. lint: 0 broken/orphan/stub.
+- **Ödünleşim (açık, belgeli):** sıralı akış → RSI süresi sembol sayısıyla lineer
+  (8 sembol ≈17s); kota=1 hesabın kaçınılmazı. Yüksek-kota oturumla paralele dönülebilir.

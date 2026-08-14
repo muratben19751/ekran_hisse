@@ -14,9 +14,10 @@ Bu sayfa `tools/wiki_tools.py index` tarafından her sayfanın frontmatter'ında
 - [[09_sparkline_intraday_2026-08-14|09 Sparkline Intraday 2026-08-14]]  (`sources/09_sparkline_intraday_2026-08-14.md`)
 - [[10_dikey_resize_fix_2026-08-14|10 Dikey Resize Fix 2026-08-14]]  (`sources/10_dikey_resize_fix_2026-08-14.md`)
 - [[11_rsshub_user_timeline_2026-08-14|11 Rsshub User Timeline 2026-08-14]]  (`sources/11_rsshub_user_timeline_2026-08-14.md`)
+- [[12_tv_seri_limiti_sirali_akis_2026-08-14|12 Tv Seri Limiti Sirali Akis 2026-08-14]]  (`sources/12_tv_seri_limiti_sirali_akis_2026-08-14.md`)
 
 ## Entities (somut bileşenler)
-- [[data_fetcher|DataFetcher]] — TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı, RSI ve sparkline için intraday bar serisi çeken, yfinance bulk-fetch (FX/altın/kripto) kullanan veri katmanı; auth token thread-safe cache + boş-sonuçta invalidasyon, NaN/ZeroDivision, falsy-zero ve tam-sembol eşleme koruması içerir.  (`wiki/entities/data_fetcher.md`)
+- [[data_fetcher|DataFetcher]] — TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı, RSI ve sparkline intraday bar serisi çeken veri katmanı; TV hesap seri kotası düşük olduğundan RSI/history serileri tek WS'te SIRALI akıtılır (_stream_tv_series), yfinance bulk (FX/altın/kripto), auth token thread-safe cache + boş-sonuçta invalidasyon, NaN/falsy-zero/tam-sembol koruması.  (`wiki/entities/data_fetcher.md`)
 - [[overlay_window|OverlayWindow]] — Ana pencere widget'ı; şeffaf macOS overlay olarak sağ-alta yaslı açılır, hisse/Twitter/not sekmelerini barındırır; floating, monitör geçişi, sürükleme, kenar/köşe boyutlandırma ve font ölçekleme destekler.  (`wiki/entities/overlay_window.md`)
 - [[paths|paths]] — EkranHisse'nin veri-dizini yol politikasının tek kaynağı — ~/.ekranhisse için DATA_DIR, ensure_data_dir() ve data_file(); OSError'da ~'a fallback.  (`wiki/entities/paths.md`)
 - [[sparkline|Sparkline (Çizgi + Alan Dolgusu)]] — StockRow içinde gün-içi fiyatı GERÇEK intraday bar serisiyle (TV 5dk × 24 = son ~2 saat) çizgi + degrade alan dolgusu olarak gösteren mini grafik; canlı fiyat son barı günceller, son nokta anlık fiyatı vurgular.  (`wiki/entities/sparkline.md`)

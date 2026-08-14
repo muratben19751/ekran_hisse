@@ -11,6 +11,7 @@ sources:
   - sources/06_reorder_pnl_2026-08-13.md
   - sources/08_deepr_review_round4_2026-08-14.md
   - sources/11_rsshub_user_timeline_2026-08-14.md
+  - sources/12_tv_seri_limiti_sirali_akis_2026-08-14.md
 related:
   - wiki/synthesis/architecture_overview.md
 last_updated: 2026-08-14
@@ -152,6 +153,30 @@ last_updated: 2026-08-14
 
 **Kapsam DIŞI (kullanıcı kararı — teknik borç, aşağıya taşındı):** overlay.py
 God-module ve `_rebuild_rows` O(n) yüksek regresyon riskli refactor; ertelendi.
+
+---
+
+## ✅ RSI/sparkline boş: TV "exceed limit of series in the session" (2026-08-14 çözüldü)
+**Belirti:** açılışta `TV RSI critical_error` / `TV history critical_error` →
+`exceed limit of series in the session`; RSI etiketleri ve sparkline boş.
+Tweet'le ilgisiz (TV veri katmanı).
+
+**Kök neden (canlı probe):** [[data_fetcher]] RSI/history TEK chart session altında
+her (sembol[,interval]) için PARALEL `create_series` atıyordu. Ölçüm: tek session'da
+**1 seri başarılı, 2. seri reddediliyor** → bu TV hesabının eşzamanlı-seri kotası
+≈1. `critical_error` tüm batch'i düşürüyordu. Batch'leme (ilk deneme) işe yaramaz —
+kota 1 olduğundan batch boyutu ne olursa olsun 2. seri patlardı.
+
+**Çözüm:** yeni ortak motor `_stream_tv_series` — seriler tek WS'te **sıralı**
+açılır; her seri `series_completed`/`series_error`'da `remove_series` ile kapatılıp
+sonucu yayılır ve sonraki açılır (herhangi bir anda tek seri açık → kota aşılmaz).
+İki tuzak çözüldü: (1) her seri **benzersiz slot/sid** (yoksa `duplicate id`), (2)
+**ws.send kilit dışında** (reentrant kilitlenme önlemi) + `advancing` çift-sinyal
+guard'ı. Public API (`fetch_tv_rsi_bulk`/`fetch_tv_history`) değişmedi. Canlı
+doğrulandı (12/12 RSI serisi + 3/3 sparkline; hatasız). **Ödünleşim:** seri başına
+~0.75s → süre sembol sayısıyla lineer (8 sembol ≈17s); arka plan thread'inde,
+UI bloklanmaz. Kota yüksek TV oturumu ile paralel akışa dönülebilir. Bkz.
+`sources/12_tv_seri_limiti_sirali_akis_2026-08-14.md`, [[data_fetcher]].
 
 ---
 

@@ -9,6 +9,7 @@ sources:
   - sources/07_oturum_2026-08-14.md
   - sources/09_sparkline_intraday_2026-08-14.md
   - sources/10_dikey_resize_fix_2026-08-14.md
+  - sources/12_tv_seri_limiti_sirali_akis_2026-08-14.md
 last_updated: 2026-08-14
 ---
 
@@ -54,7 +55,7 @@ TradingView WebSocket
 |-------|-----|
 | `main.py` | Giriş; `paths.ensure_data_dir()`, `fcntl` tek-instance kilidi, Qt app + Signal kablaj |
 | `overlay.py` | Tüm UI: `OverlayWindow`, `StockRow`, `Sparkline`, sheet'ler, floating/monitör |
-| `data_fetcher.py` | TV WebSocket fiyat/RSI + yfinance özel semboller; NaN/timeout korumalı |
+| `data_fetcher.py` | TV WebSocket fiyat/RSI + yfinance özel semboller; NaN/timeout korumalı; RSI/sparkline serileri TV hesap seri-kotası (≈1) nedeniyle tek WS'te SIRALI akıtılır ([[data_fetcher]] `_stream_tv_series`, 2026-08-14) |
 | [[paths]] | `~/.ekranhisse` yol politikası tek kaynak (`DATA_DIR`/`ensure_data_dir`/`data_file`) |
 | [[symbols]] | Sembol evreni tek kaynak (`symbols.json` → BIST ∪ SPECIALS = KNOWN + US_SYMBOLS; yf & tv eşlemesi, ABD hisseleri 2026-08-14) |
 | [[twitter_client]] | 𝕏 ağ katmanı (UI'dan ayrık; self-hosted RSSHub **user-timeline** köprüsü — 2026-08-14'te keyword route X'te bozulunca geçildi; sabit hesaplar paralel çekilir, izlenen sembollere göre süzülür + 429 backoff) |

@@ -528,16 +528,17 @@ def test_fetch_all_specials_prev_zero_no_div_by_zero(monkeypatch):
 # WebSocketApp sahtelenir, verilen bar'lar bir timescale_update paketiyle
 # on_message'a beslenir. TV mesaj formatı değişirse test kırılır.
 def _drive_fetch_tv_rsi(monkeypatch, symbol, interval, bars):
-    """WebSocketApp'i sahtele; _fetch_tv_rsi_bulk_once'ın gerçek on_open/
-    on_message'ını sürerek verilen bar'lardan hesaplanan RSI'yı döndür.
+    """WebSocketApp'i sahtele; _stream_tv_series'in gerçek on_open/on_message'ını
+    sürerek verilen bar'lardan hesaplanan RSI'yı döndür.
 
     bars: [{"v": [time, open, high, low, close, volume]}] — TV bar formatı.
-    Döndürür: sembol/interval için hesaplanan RSI değeri (veya None).
+    Döndürür: sembol/interval için hesaplanan RSI değeri (veya None). Motor tek
+    seriyi sabit sid ("s0") ile açar; timescale_update + series_completed
+    paketleri o sid ile beslenir.
     """
     import data_fetcher as _df
 
-    slot = "sym0"          # tek sembol → resolve slot'u
-    sid = f"{slot}_{interval}"
+    sid = "s0"             # _stream_tv_series sabit sid'i
 
     class _FakeWS:
         def __init__(self, url, header=None, on_open=None, on_message=None,
@@ -546,12 +547,12 @@ def _drive_fetch_tv_rsi(monkeypatch, symbol, interval, bars):
             self._on_message = on_message
 
         def run_forever(self, **kw):
-            self._on_open(self)          # resolve_symbol + create_series (yutulur)
+            self._on_open(self)          # chart_create_session + ilk seri açılır
             # Gerçek TV timescale_update paketi biçimi: p[1] = {sid: {"s": bars}}
             pkt = {"m": "timescale_update", "p": ["cs", {sid: {"s": bars}}]}
             body = _df.json.dumps(pkt)
             self._on_message(self, f"~m~{len(body)}~m~{body}")
-            # Seriyi tamamla ki done event set olsun ve fetch beklemesin.
+            # Seriyi tamamla → motor remove_series + (tek seri olduğundan) done.
             done_pkt = {"m": "series_completed", "p": ["cs", sid, "streaming"]}
             db = _df.json.dumps(done_pkt)
             self._on_message(self, f"~m~{len(db)}~m~{db}")
@@ -584,3 +585,228 @@ def test_tv_timescale_short_v_array_skipped(monkeypatch):
     bars = [{"v": [1, 2, 3]}, {"v": [10, 11, 12, 13, 42.0, 99]}]
     rsi = _drive_fetch_tv_rsi(monkeypatch, "THYAO", 15, bars)
     assert rsi is None
+
+
+def test_stream_tv_series_sequential_and_remove(monkeypatch):
+    # _stream_tv_series'in GERÇEK on_open/on_message'ını süren WS mock'u: iki seri
+    # sırayla açılmalı, birincisi tamamlanınca remove_series gönderilip İKİNCİ
+    # seri create_series ile açılmalı, hiçbir anda ikiden fazla seri açık olmamalı.
+    # Bu, 'exceed limit of series in the session' hatasının önlendiğini kanıtlar.
+    import data_fetcher as _df
+
+    # Her seri BENZERSİZ sid alır (s0, s1, ...); create_series frame'inden okunur.
+    per_series_bars = {
+        0: [{"v": [1, 2, 3, 4, 10.0, 5]}, {"v": [2, 3, 4, 5, 11.0, 6]}],
+        1: [{"v": [1, 2, 3, 4, 20.0, 5]}, {"v": [2, 3, 4, 5, 21.0, 6]}],
+    }
+
+    class _FakeWS:
+        def __init__(self, url, header=None, on_open=None, on_message=None,
+                     on_error=None, on_close=None):
+            self._on_open = on_open
+            self._on_message = on_message
+            self.open_count = 0        # create_series sayısı
+            self.live = 0              # o an açık seri (create - remove)
+            self.max_live = 0
+            self.series_idx = -1
+
+        def _feed(self, pkt):
+            body = _df.json.dumps(pkt)
+            self._on_message(self, f"~m~{len(body)}~m~{body}")
+
+        def run_forever(self, **kw):
+            self._on_open(self)        # chart_create_session + 1. create_series
+
+        def send(self, frame):
+            # Gönderilen mesajı ayrıştır (frame: "~m~<len>~m~<json>").
+            try:
+                body = frame.split("~m~", 2)[-1]
+                pkt = _df.json.loads(body)
+            except Exception:
+                return
+            m = pkt.get("m")
+            if m == "create_series":
+                sid = pkt["p"][1]      # create_series p = [cs, sid, sid, slot, iv, bars]
+                self.open_count += 1
+                self.series_idx += 1
+                self.live += 1
+                self.max_live = max(self.max_live, self.live)
+                idx = self.series_idx
+                # Bu seri için veri + tamamlanma paketlerini besle.
+                self._feed({"m": "timescale_update",
+                            "p": ["cs", {sid: {"s": per_series_bars[idx]}}]})
+                self._feed({"m": "series_completed", "p": ["cs", sid, "streaming"]})
+            elif m == "remove_series":
+                self.live -= 1
+
+        def close(self):
+            pass
+
+    created = {"ws": None}
+    orig = _FakeWS
+
+    def _factory(*a, **k):
+        created["ws"] = orig(*a, **k)
+        return created["ws"]
+
+    monkeypatch.setattr(_df.websocket, "WebSocketApp", _factory)
+    monkeypatch.setattr(_df, "_get_tv_auth_token", lambda: "tok")
+
+    results = []
+    specs = [
+        (("THYAO", 5), "BIST:THYAO", "5", 10),
+        (("AKBNK", 5), "BIST:AKBNK", "5", 10),
+    ]
+    _df._stream_tv_series(specs, lambda key, closes: results.append((key, closes)))
+
+    ws = created["ws"]
+    assert ws.open_count == 2                 # iki seri açıldı
+    assert ws.max_live == 1                   # ama aynı anda EN FAZLA 1 açık
+    assert [r[0] for r in results] == [("THYAO", 5), ("AKBNK", 5)]   # sıra korundu
+    assert results[0][1] == [10.0, 11.0]
+    assert results[1][1] == [20.0, 21.0]
+
+
+def test_stream_tv_series_error_advances(monkeypatch):
+    # Bir seri series_error verirse motor boş sonuçla SONRAKİ seriye geçmeli
+    # (takılıp kalmamalı).
+    import data_fetcher as _df
+
+    class _FakeWS:
+        def __init__(self, url, header=None, on_open=None, on_message=None,
+                     on_error=None, on_close=None):
+            self._on_open = on_open
+            self._on_message = on_message
+            self.idx = -1
+
+        def _feed(self, pkt):
+            body = _df.json.dumps(pkt)
+            self._on_message(self, f"~m~{len(body)}~m~{body}")
+
+        def run_forever(self, **kw):
+            self._on_open(self)
+
+        def send(self, frame):
+            try:
+                pkt = _df.json.loads(frame.split("~m~", 2)[-1])
+            except Exception:
+                return
+            if pkt.get("m") == "create_series":
+                sid = pkt["p"][1]      # benzersiz sid (s0, s1, ...)
+                self.idx += 1
+                if self.idx == 0:
+                    self._feed({"m": "series_error", "p": ["cs", sid]})
+                else:
+                    self._feed({"m": "timescale_update",
+                                "p": ["cs", {sid: {"s": [{"v": [1, 2, 3, 4, 9.0, 5]}]}}]})
+                    self._feed({"m": "series_completed", "p": ["cs", sid, "streaming"]})
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(_df.websocket, "WebSocketApp", _FakeWS)
+    monkeypatch.setattr(_df, "_get_tv_auth_token", lambda: "tok")
+
+    results = []
+    specs = [
+        (("A", 5), "BIST:A", "5", 10),
+        (("B", 5), "BIST:B", "5", 10),
+    ]
+    _df._stream_tv_series(specs, lambda key, closes: results.append((key, closes)))
+
+    assert results[0] == (("A", 5), [])       # hatalı seri boş
+    assert results[1] == (("B", 5), [9.0])    # sonraki seri normal
+
+
+# ── Sıralı seri akışı (exceed limit of series koruması) ─────────────────────
+# TV hesabının eşzamanlı-seri kotası düşük olabildiğinden seriler tek WS'te
+# SIRAYLA açılır (_stream_tv_series). fetch_tv_rsi_bulk / fetch_tv_history bu
+# motoru kullanır; motor mock'lanarak seri sırası ve sonuç eşlemesi doğrulanır.
+def test_rsi_bulk_uses_sequential_stream(monkeypatch):
+    # fetch_tv_rsi_bulk her (sembol, interval) için bir spec üretmeli; _on_closes
+    # ham close'ları _calc_rsi'ye vermeli. Motoru mock'layıp her spec'e sabit
+    # artan close serisi besle → RSI 100.0 (sadece artış).
+    import data_fetcher as _df
+
+    seen_specs = []
+
+    def _fake_stream(specs, on_closes, timeout=40.0):
+        for key, tv_sym, tv_iv, bars in specs:
+            seen_specs.append((key, tv_iv))
+            on_closes(key, [10.0 + i for i in range(16)])   # artan → RSI 100
+
+    monkeypatch.setattr(_df, "_stream_tv_series", _fake_stream)
+    out = _df.fetch_tv_rsi_bulk(["THYAO", "AKBNK"], intervals=[5, 15])
+
+    # 2 sembol × 2 interval = 4 seri, sırayla.
+    assert len(seen_specs) == 4
+    assert seen_specs[0] == (("THYAO", 5), "5")
+    assert out["THYAO"][5] == 100.0
+    assert out["AKBNK"][15] == 100.0
+
+
+def test_rsi_bulk_empty_closes_stays_none(monkeypatch):
+    # Bir seri boş dönerse (hata/veri yok) o (sembol, interval) None kalmalı.
+    import data_fetcher as _df
+
+    def _fake_stream(specs, on_closes, timeout=40.0):
+        for key, *_rest in specs:
+            on_closes(key, [])          # boş → RSI hesaplanmaz
+
+    monkeypatch.setattr(_df, "_stream_tv_series", _fake_stream)
+    out = _df.fetch_tv_rsi_bulk(["THYAO"], intervals=[5])
+    assert out["THYAO"][5] is None
+
+
+def test_rsi_bulk_retries_when_all_none(monkeypatch):
+    # Tüm sonuçlar None → token invalide edilip bir kez yeniden denenir.
+    import data_fetcher as _df
+
+    monkeypatch.setattr(_df, "TV_SESSION_ID", "sess")
+    monkeypatch.setattr(_df, "_tv_auth_token_cache", ["tok", 0.0])
+    invalidated = []
+    monkeypatch.setattr(_df, "_invalidate_tv_auth_token",
+                        lambda: invalidated.append(True))
+    calls = {"n": 0}
+
+    def _fake_stream(specs, on_closes, timeout=40.0):
+        calls["n"] += 1
+        closes = [] if calls["n"] == 1 else [10.0 + i for i in range(16)]
+        for key, *_rest in specs:
+            on_closes(key, closes)
+
+    monkeypatch.setattr(_df, "_stream_tv_series", _fake_stream)
+    out = _df.fetch_tv_rsi_bulk(["THYAO"], intervals=[5])
+    assert invalidated == [True]
+    assert calls["n"] == 2
+    assert out["THYAO"][5] == 100.0
+
+
+def test_history_uses_sequential_stream(monkeypatch):
+    # fetch_tv_history her sembol için bir spec üretmeli; _on_closes son `bars`
+    # close'u sembole yazmalı. Sıra korunur.
+    import data_fetcher as _df
+
+    seen = []
+
+    def _fake_stream(specs, on_closes, timeout=40.0):
+        for key, tv_sym, tv_iv, bars in specs:
+            seen.append(key)
+            on_closes(key, [1.0, 2.0, 3.0, 4.0])
+
+    monkeypatch.setattr(_df, "_stream_tv_series", _fake_stream)
+    out = _df.fetch_tv_history(["THYAO", "AKBNK"], interval=5, bars=3)
+
+    assert seen == ["THYAO", "AKBNK"]
+    assert out["THYAO"] == [2.0, 3.0, 4.0]      # son 3 bar
+    assert out["AKBNK"] == [2.0, 3.0, 4.0]
+
+
+def test_history_empty_symbols_no_stream(monkeypatch):
+    import data_fetcher as _df
+
+    called = []
+    monkeypatch.setattr(_df, "_stream_tv_series",
+                        lambda *a, **k: called.append(True))
+    assert _df.fetch_tv_history([], interval=5, bars=24) == {}
+    assert called == []

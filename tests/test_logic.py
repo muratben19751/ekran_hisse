@@ -460,3 +460,35 @@ def test_compute_pnl_ignores_nonpositive_or_bool_qty():
     assert logic.compute_pnl(100.0, 110.0, 0)[0] is None
     assert logic.compute_pnl(100.0, 110.0, -5)[0] is None
     assert logic.compute_pnl(100.0, 110.0, True)[0] is None
+
+
+def test_compute_pnl_viop_mult_scales_amount_not_pct():
+    # VİOP çarpanı: tutar ×100 olur ama yüzde değişmez
+    amount, pct = logic.compute_pnl(100.0, 110.0, 5, 100)
+    assert amount == pytest.approx(5000.0)     # (110-100)*5*100
+    assert pct == pytest.approx(10.0)
+
+
+def test_compute_pnl_mult_defaults_to_one():
+    # mult None / geçersiz / ≤0 / bool → 1 sayılır (normal hisse)
+    base = logic.compute_pnl(100.0, 110.0, 5)[0]
+    assert logic.compute_pnl(100.0, 110.0, 5, None)[0] == pytest.approx(base)
+    assert logic.compute_pnl(100.0, 110.0, 5, 0)[0] == pytest.approx(base)
+    assert logic.compute_pnl(100.0, 110.0, 5, -3)[0] == pytest.approx(base)
+    assert logic.compute_pnl(100.0, 110.0, 5, True)[0] == pytest.approx(base)
+
+
+def test_compute_pnl_mult_without_qty_still_none():
+    # Adet yoksa çarpan tek başına tutar üretmez (yalnız yüzde)
+    amount, pct = logic.compute_pnl(100.0, 110.0, None, 100)
+    assert amount is None
+    assert pct == pytest.approx(10.0)
+
+
+def test_sanitize_stocks_preserves_mult():
+    out = logic.sanitize_stocks([
+        {"symbol": "F_XU0300825", "entry": 10.0, "mult": 100},
+        {"symbol": "THYAO", "entry": 5.0, "mult": "bad"},
+    ])
+    assert out[0]["mult"] == 100
+    assert out[1]["mult"] is None      # geçersiz → None

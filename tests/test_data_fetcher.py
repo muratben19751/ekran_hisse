@@ -141,6 +141,85 @@ def test_tv_symbol_rsi_case_insensitive():
     assert sym_universe.tv_symbol("xauusd") == "OANDA:XAUUSD"
 
 
+# ── US (NASDAQ/NYSE) sembol adresleri + çakışma eşlemesi ─────────────────────
+def test_tv_symbol_us_exchange_prefix():
+    assert sym_universe.tv_symbol("AAPL") == "NASDAQ:AAPL"
+    assert sym_universe.tv_symbol("KO") == "NYSE:KO"
+
+
+def test_us_symbol_not_special_goes_tv_path(monkeypatch):
+    # US hissesi is_special DEĞİL → fetch_all'da bist_syms (TV WS) yoluna gider,
+    # yfinance'a değil. fetch_tv_prices monkeypatch'le doğrula.
+    assert sym_universe.is_special("AAPL") is False
+    seen = {}
+
+    def fake_tv(syms):
+        seen["syms"] = list(syms)
+        return {"AAPL": (300.0, 1.0, 0, 0)}
+
+    monkeypatch.setattr(df, "fetch_tv_prices", fake_tv)
+    fired, calls = _run_fetch_all(["AAPL"])
+    assert fired and len(calls) == 1
+    assert seen["syms"] == ["AAPL"]              # TV yoluna gitti
+    out = {d["symbol"]: d for d in calls[0]}
+    assert out["AAPL"]["price"] == 300.0
+
+
+def _drive_fetch_tv_prices(monkeypatch, symbols, qsd_packets):
+    """WebSocketApp'i sahtele; on_open (mesaj gönderimi yutulur) + verilen qsd
+    paketlerini on_message'a besle. fetch_tv_prices sonucunu döndür.
+
+    qsd_packets: [(n_full, price)] — TV 'qsd' mesajındaki 'n' (tam sembol) + lp.
+    """
+    import data_fetcher as _df
+
+    class _FakeWS:
+        def __init__(self, url, header=None, on_open=None, on_message=None,
+                     on_error=None, on_close=None):
+            self._on_open = on_open
+            self._on_message = on_message
+
+        def run_forever(self, **kw):
+            # on_open: gönderilen mesajlar yutulur (send no-op)
+            self._on_open(self)
+            for n_full, price in qsd_packets:
+                pkt = {"m": "qsd", "p": ["qs", {"n": n_full, "v": {"lp": price}}]}
+                body = _df.json.dumps(pkt)
+                self._on_message(self, f"~m~{len(body)}~m~{body}")
+
+        def send(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(_df.websocket, "WebSocketApp", _FakeWS)
+    # auth token HTTP'sini atla
+    monkeypatch.setattr(_df, "_get_tv_auth_token", lambda: "tok")
+    return _df.fetch_tv_prices(symbols)
+
+
+def test_fetch_tv_prices_maps_full_symbol_no_exchange_clash(monkeypatch):
+    # BIST:KO ve NYSE:KO ayrı kullanıcı sembollerine doğru eşlenmeli; eski
+    # split(':')[-1] eşlemesi ikisini de "KO"ya çökertirdi.
+    # (KO BIST'te YOK; senaryo için tam-sembol eşlemesini iki farklı US sembolüyle
+    #  kanıtlıyoruz: AAPL/NASDAQ ve KO/NYSE.)
+    res = _drive_fetch_tv_prices(
+        monkeypatch, ["AAPL", "KO"],
+        [("NASDAQ:AAPL", 300.0), ("NYSE:KO", 87.0)],
+    )
+    assert res["AAPL"][0] == 300.0
+    assert res["KO"][0] == 87.0
+
+
+def test_fetch_tv_prices_bist_still_works(monkeypatch):
+    # Regresyon: BIST sembolü tam-sembol haritasıyla da doğru eşlenir.
+    res = _drive_fetch_tv_prices(
+        monkeypatch, ["THYAO"], [("BIST:THYAO", 55.5)],
+    )
+    assert res["THYAO"][0] == 55.5
+
+
 # ── fetch_all: 'callback her durumda tam bir kez' invaryantı ──────────────────
 # En kritik eşzamanlılık sözleşmesi (aksi halde UI'daki 'Güncelleniyor…' kilidi
 # kalıcı olur). Ağ katmanı monkeypatch'le sahtelenir; Qt gerekmez.

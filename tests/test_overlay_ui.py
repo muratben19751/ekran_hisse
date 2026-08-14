@@ -279,6 +279,18 @@ def test_add_from_search_accepts_known_and_dedupes(win):
     assert len(win.stocks) == n
 
 
+def test_add_from_search_us_symbol_stored_plain(win):
+    # ABD hissesi (AAPL) eklenince stocks.json'da DÜZ "AAPL" saklanır — borsa
+    # bilgisi runtime'da tv_symbol/yf_ticker ile çözülür, şema değişmez.
+    win.stocks = []
+    win.search.setText("aapl")
+    win._add_from_search()
+    assert any(s["symbol"] == "AAPL" for s in win.stocks)
+    rec = next(s for s in win.stocks if s["symbol"] == "AAPL")
+    assert rec["symbol"] == "AAPL"           # prefix/borsa gömülmedi
+    assert ":" not in rec["symbol"]
+
+
 # ── apply_rsi → _rsi_cache → _rebuild_rows sonrası RSI restore (#40) ──────────
 def test_apply_rsi_caches_and_restores_after_rebuild(win):
     win.stocks = [{"symbol": "THYAO", "entry": None, "exit": None}]

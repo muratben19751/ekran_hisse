@@ -580,10 +580,10 @@ class StockPickerSheet(_SheetDialog):
 
 
 class TargetSheet(_SheetDialog):
-    """Giriş + çıkış hedefi + adet tek sheet'te
-    (result: ('save', e, x, qty) | ('clear',) | None)."""
+    """Giriş + çıkış hedefi + adet + çarpan tek sheet'te
+    (result: ('save', e, x, qty, mult) | ('clear',) | None)."""
 
-    def __init__(self, symbol, entry=None, exit_price=None, qty=None, parent=None):
+    def __init__(self, symbol, entry=None, exit_price=None, qty=None, mult=None, parent=None):
         super().__init__(parent)
         head = QWidget()
         h = QHBoxLayout(head)
@@ -592,7 +592,7 @@ class TargetSheet(_SheetDialog):
         sym = QLabel(symbol)
         sym.setFont(_f(13, QFont.DemiBold))
         sym.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
-        sub = QLabel("giriş / çıkış / adet")
+        sub = QLabel("giriş / çıkış / adet / çarpan")
         sub.setFont(_f(12))
         sub.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         h.addWidget(sym)
@@ -605,12 +605,18 @@ class TargetSheet(_SheetDialog):
         w1, self.inp_entry = self._field("Giriş", _tr(entry) if entry is not None else "")
         w2, self.inp_exit  = self._field("Çıkış", _tr(exit_price) if exit_price is not None else "")
         w3, self.inp_qty   = self._field("Adet", _tr(qty) if qty is not None else "")
+        w4, self.inp_mult  = self._field("Çarpan", _tr(mult) if mult is not None else "")
         self.inp_entry.setPlaceholderText("62,30")
         self.inp_exit.setPlaceholderText("71,00")
         self.inp_qty.setPlaceholderText("100")
+        # VİOP kontratlarında lot çarpanı (ör. 100). Boş = 1 (normal hisse).
+        self.inp_mult.setPlaceholderText("1")
+        self.inp_mult.setToolTip("VİOP kontrat çarpanı (ör. 100). Boş = 1.\n"
+                                 "Yalnızca Kâr/Zarar tutarını ölçekler, fiyat/yüzdeyi değil.")
         fields.addWidget(w1)
         fields.addWidget(w2)
         fields.addWidget(w3)
+        fields.addWidget(w4)
         self.lay.addLayout(fields)
 
         bar = QHBoxLayout()
@@ -634,10 +640,11 @@ class TargetSheet(_SheetDialog):
         self.inp_entry.returnPressed.connect(self._save)
         self.inp_exit.returnPressed.connect(self._save)
         self.inp_qty.returnPressed.connect(self._save)
+        self.inp_mult.returnPressed.connect(self._save)
         cancel.clicked.connect(self.reject)
         clear.clicked.connect(self._clear)
         self.inp_entry.setFocus()
-        self._place(360, 150)
+        self._place(460, 150)
 
     # Boş girdi ile geçersiz girdiyi AYIRT etmek için sentinel: boş alan hedefi
     # bilinçli olarak temizler (None, geçerli); '71x' gibi çözümlenemeyen girdi
@@ -666,20 +673,24 @@ class TargetSheet(_SheetDialog):
         entry = self._num(self.inp_entry.text())
         exit_ = self._num(self.inp_exit.text())
         qty   = self._num(self.inp_qty.text())
+        mult  = self._num(self.inp_mult.text())
         bad_entry = entry is self._INVALID
         bad_exit = exit_ is self._INVALID
         bad_qty = qty is self._INVALID
+        bad_mult = mult is self._INVALID
         self._mark_invalid(self.inp_entry, bad_entry)
         self._mark_invalid(self.inp_exit, bad_exit)
         self._mark_invalid(self.inp_qty, bad_qty)
-        if bad_entry or bad_exit or bad_qty:
+        self._mark_invalid(self.inp_mult, bad_mult)
+        if bad_entry or bad_exit or bad_qty or bad_mult:
             # Geçersiz sayı: accept ETME — kullanıcı hedef koyduğunu sanıp None'a
             # düşmesin. Odağı ilk hatalı alana ver.
             first = (self.inp_entry if bad_entry else
-                     self.inp_exit if bad_exit else self.inp_qty)
+                     self.inp_exit if bad_exit else
+                     self.inp_qty if bad_qty else self.inp_mult)
             first.setFocus()
             return
-        self.result_value = ("save", entry, exit_, qty)
+        self.result_value = ("save", entry, exit_, qty, mult)
         self.accept()
 
     def _clear(self):
@@ -773,13 +784,14 @@ class Sparkline(QWidget):
 
 class StockRow(QWidget):
     remove_requested = Signal(str)
-    levels_changed   = Signal(str, object, object, object)
+    levels_changed   = Signal(str, object, object, object, object)
     move_requested   = Signal(str, int)
 
-    def __init__(self, symbol, entry=None, exit_price=None, qty=None, parent=None):
+    def __init__(self, symbol, entry=None, exit_price=None, qty=None, mult=None, parent=None):
         super().__init__(parent)
         self.symbol = symbol
         self._entry, self._exit, self._qty, self._price = entry, exit_price, qty, None
+        self._mult = mult
         self._press_pos = None
         self._reached = False
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -823,35 +835,45 @@ class StockRow(QWidget):
         self.lbl_price.setStyleSheet(f"color: {C_TEXT2}; background: transparent;")
 
         self.lbl_pct = QLabel("—")
-        self.lbl_pct.setFont(_f(11, QFont.DemiBold))
-        self.lbl_pct.setFixedWidth(_sf(46))
-        self.lbl_pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.lbl_pct.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        self.lbl_pct.setFont(_f(10, QFont.Bold))
+        # Pill sabit yükseklikte tutulur (satır 26px'e oturur); radius =
+        # yükseklik/2 → gerçek kapsül şekli. Yükseklik satırı zorlamasın diye
+        # 26px satırda ~18px pill kullanılır, dikey ortalanır.
+        self._pill_h = _sf(18)
+        self.lbl_pct.setFixedSize(_sf(48), self._pill_h)
+        self.lbl_pct.setAlignment(Qt.AlignCenter)
+        self.lbl_pct.setStyleSheet(
+            f"color: {C_TEXT3}; background: transparent;"
+            f" border-radius: {self._pill_h // 2}px;")
 
         lay.addWidget(head)
         lay.addWidget(self.spark, 1)
         lay.addWidget(self.lbl_price)
-        lay.addWidget(self.lbl_pct)
+        lay.addWidget(self.lbl_pct, 0, Qt.AlignVCenter)
 
-        # Kâr/Zarar etiketi: giriş fiyatı girilmişse tutar (adet varsa) + yüzde.
-        # Entry yoksa gizli — mevcut sade satır görünümü korunur.
+        # 1d: Kâr/Zarar ve RSI ayrı sağ sütunlar yerine satırın ALTINDA meta
+        # satırında — 300px panelde ana satırı sıkıştırmaz. Meta satırı yalnızca
+        # PnL veya RSI verisi varken görünür; satır yüksekliği 26 → 40.
+        self.meta = QWidget()
+        self.meta.setStyleSheet("background: transparent;")
+        ml = QHBoxLayout(self.meta)
+        ml.setContentsMargins(12 + _sf(64), 0, 12, _sf(3))
+        ml.setSpacing(8)
         self.lbl_pnl = QLabel("")
         self.lbl_pnl.setFont(_f(9, QFont.DemiBold))
-        self.lbl_pnl.setFixedWidth(_sf(96))
-        self.lbl_pnl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.lbl_pnl.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         self.lbl_pnl.setVisible(False)
-        lay.addWidget(self.lbl_pnl)
-
         self.lbl_rsi = QLabel("")
-        self.lbl_rsi.setFont(_f(8))
-        self.lbl_rsi.setFixedWidth(_sf(80))
-        self.lbl_rsi.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_rsi.setFont(_f(9))
         self.lbl_rsi.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         self.lbl_rsi.setVisible(False)
-        lay.addWidget(self.lbl_rsi)
+        ml.addWidget(self.lbl_pnl)
+        ml.addStretch()
+        ml.addWidget(self.lbl_rsi)
+        self.meta.setVisible(False)
 
         outer.addWidget(top)
+        outer.addWidget(self.meta)
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._ctx_menu)
@@ -867,6 +889,7 @@ class StockRow(QWidget):
                 parts.append(f"{iv}m:{int(round(v))}")
         if not parts:
             self.lbl_rsi.setVisible(False)
+            self._sync_height()
             return
         # En kısa interval rengi temsil eder
         anchor = next(
@@ -886,6 +909,7 @@ class StockRow(QWidget):
         self.lbl_rsi.setStyleSheet(f"color: {color}; background: transparent;")
         self.lbl_rsi.setText("  ".join(parts))
         self.lbl_rsi.setVisible(True)
+        self._sync_height()
 
     # görünüm ------------------------------------------------------------
     def _paint_bg(self):
@@ -894,6 +918,16 @@ class StockRow(QWidget):
             f"#row {{ background: {tint}; }}"
             f"#row:hover {{ background: {C_ROW_HOVER}; }}"
         )
+
+    def _sync_height(self):
+        """Meta satırı (PnL/RSI) görünürlüğüne göre satır yüksekliği 26/40.
+
+        isHidden() kullanılır (isVisible değil): parent gizliyken de widget'ın
+        AÇIK gizlenme durumunu doğru raporlar.
+        """
+        has_meta = (not self.lbl_pnl.isHidden()) or (not self.lbl_rsi.isHidden())
+        self.meta.setVisible(has_meta)
+        self.setFixedHeight(_sf(40 if has_meta else 26))
 
     def _sync_target(self):
         has = self._entry is not None and self._exit is not None
@@ -918,7 +952,7 @@ class StockRow(QWidget):
         # Kâr/Zarar: yalnızca giriş fiyatı (exit hedefi gerekmez). Adet varsa
         # tutar da hesaplanır (compute_pnl). Etiket satırda görünür + tooltip'e
         # eklenir; giriş yoksa gizli.
-        amount, pct = compute_pnl(self._entry, self._price, self._qty)
+        amount, pct = compute_pnl(self._entry, self._price, self._qty, self._mult)
         if pct is None:
             self.lbl_pnl.setVisible(False)
         else:
@@ -935,6 +969,7 @@ class StockRow(QWidget):
                 tip = (tip + "  ·  " if tip else "") + txt
 
         self.setToolTip(tip)
+        self._sync_height()
         self._paint_bg()
 
     def update_data(self, price, change_pct):
@@ -942,12 +977,17 @@ class StockRow(QWidget):
         self.lbl_price.setText("—" if price is None else _tr(price))
         if change_pct is None:
             self.lbl_pct.setText("—")
-            self.lbl_pct.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+            self.lbl_pct.setStyleSheet(
+                f"color: {C_TEXT3}; background: transparent;"
+                f" border-radius: {self._pill_h // 2}px;")
         else:
+            # 1d: yüzde değişim dolgulu pill — yeşil/kırmızı zemin, koyu mürekkep.
             up = change_pct >= 0
             self.lbl_pct.setText(("+" if up else "−") + _tr(abs(change_pct)))
             self.lbl_pct.setStyleSheet(
-                f"color: {C_GREEN if up else C_RED}; background: transparent;"
+                f"color: {C_GREEN_INK if up else C_RED_INK};"
+                f" background: {C_GREEN if up else C_RED};"
+                f" border-radius: {self._pill_h // 2}px;"
             )
         # Sparkline'ı change_pct'ten BAĞIMSIZ, fiyat geldiğinde güncelle: TV
         # paketinde chp None gelip price dolu olabilir ({price, change_pct:None});
@@ -1000,23 +1040,24 @@ class StockRow(QWidget):
         m.exec(self.mapToGlobal(pos))
 
     def _open_target(self):
-        dlg = TargetSheet(self.symbol, self._entry, self._exit, self._qty,
+        dlg = TargetSheet(self.symbol, self._entry, self._exit, self._qty, self._mult,
                           parent=self.window())
         dlg.exec()
         res = dlg.result_value
         if not res:
             return
         if res[0] == "clear":
-            self._entry = self._exit = self._qty = None
+            self._entry = self._exit = self._qty = self._mult = None
         else:
-            self._entry, self._exit, self._qty = res[1], res[2], res[3]
+            self._entry, self._exit, self._qty, self._mult = res[1], res[2], res[3], res[4]
         self._sync_target()
-        self.levels_changed.emit(self.symbol, self._entry, self._exit, self._qty)
+        self.levels_changed.emit(
+            self.symbol, self._entry, self._exit, self._qty, self._mult)
 
     def _clear_target(self):
-        self._entry = self._exit = self._qty = None
+        self._entry = self._exit = self._qty = self._mult = None
         self._sync_target()
-        self.levels_changed.emit(self.symbol, None, None, None)
+        self.levels_changed.emit(self.symbol, None, None, None, None)
 
 
 class GroupHeader(QWidget):
@@ -1947,8 +1988,8 @@ class OverlayWindow(QWidget):
             self._twitter_load()   # sorgu değişti; yeni akışı çek
 
     def _twitter_token(self):
-        # Nitter RSS köprüsü kimlik doğrulama gerektirmez; kaynak her zaman
-        # denenir. (Eskiden X bearer token'a bakardı — artık kullanılmıyor.)
+        # RSSHub keyword köprüsü kimlik doğrulama gerektirmez (X auth_token
+        # RSSHub tarafında tutulur); kaynak her zaman denenir.
         return True
 
     def _twitter_mark_read(self):
@@ -1998,7 +2039,7 @@ class OverlayWindow(QWidget):
         self._twitter_style_chip(w, active)
         return w
 
-    def _twitter_row(self, tw, user, unread, symbol):
+    def _twitter_row(self, tw, user, unread, symbols):
         row = QWidget()
         row.setObjectName("twrow")
         row.setAttribute(Qt.WA_StyledBackground, True)
@@ -2044,14 +2085,6 @@ class OverlayWindow(QWidget):
             f"color: {C_TEXT if unread else C_TEXT2}; background: transparent;"
         )
         top.addWidget(lbl_user)
-        if symbol:
-            chip = QLabel(symbol)
-            chip.setFont(_f(9, QFont.DemiBold))
-            chip.setStyleSheet(
-                f"color: {C_TEXT2 if unread else C_TEXT4};"
-                " background: rgba(255,255,255,20); border-radius: 3px; padding: 0 4px;"
-            )
-            top.addWidget(chip)
         top.addStretch()
         ts = tw.get("created_at", "")
         lbl_ts = QLabel(_tw_ago(ts))
@@ -2069,6 +2102,25 @@ class OverlayWindow(QWidget):
             f"color: {C_TEXT2 if unread else C_TEXT3}; background: transparent;"
         )
         body.addWidget(lbl_text)
+
+        # 2a: eşleşen TÜM semboller ad satırı yerine metnin ALTINDA meta
+        # satırında — okunmamışta mavi, okunmuşta soluk. Sembolsüz tweet'te
+        # meta satırı hiç yok.
+        if symbols:
+            meta = QHBoxLayout()
+            meta.setContentsMargins(0, 1, 0, 0)
+            meta.setSpacing(8)
+            lbl_syms = QLabel(" · ".join(symbols))
+            lbl_syms.setFont(_f(9, QFont.DemiBold))
+            lbl_syms.setStyleSheet(
+                f"color: {C_BLUE if unread else C_TEXT3}; background: transparent;")
+            hint = QLabel("𝕏'te aç ↗")
+            hint.setFont(_f(9))
+            hint.setStyleSheet(f"color: {C_TEXT4}; background: transparent;")
+            meta.addWidget(lbl_syms)
+            meta.addStretch()
+            meta.addWidget(hint)
+            body.addLayout(meta)
         lay.addLayout(body, 1)
         return row
 
@@ -2144,8 +2196,8 @@ class OverlayWindow(QWidget):
             ms = syms_of(tw)
             unread = tw.get("id", "") in self._tw_hl
             user = self._tw_users.get(tw.get("author_id", ""), {})
-            # Chip etiketinde ilk eşleşen sembolü göster (satır başına tek rozet).
-            row = self._twitter_row(tw, user, unread, ms[0] if ms else "")
+            # Meta satırında eşleşen TÜM semboller gösterilir (2a).
+            row = self._twitter_row(tw, user, unread, ms)
             self.twitter_layout.addWidget(row)
             self._tw_rows.append((ms, row))
 
@@ -2460,7 +2512,8 @@ class OverlayWindow(QWidget):
             # alınır. Böylece arama her tuşta widget yok edip yeniden kurmaz.
             for i, s in enumerate(items):
                 sym = s["symbol"]
-                row = StockRow(sym, s.get("entry"), s.get("exit"), s.get("qty"))
+                row = StockRow(sym, s.get("entry"), s.get("exit"), s.get("qty"),
+                               s.get("mult"))
                 hist = self._spark_history.get(sym)
                 if hist:
                     row.spark.restore(hist)
@@ -2639,12 +2692,13 @@ class OverlayWindow(QWidget):
         self._rebuild_rows()
         self._apply_cached_prices()
 
-    def _update_levels(self, symbol, entry, exit_price, qty=None):
+    def _update_levels(self, symbol, entry, exit_price, qty=None, mult=None):
         for s in self.stocks:
             if s["symbol"] == symbol:
                 s["entry"] = entry
                 s["exit"] = exit_price
                 s["qty"] = qty
+                s["mult"] = mult
                 break
         save_stocks(self.stocks)
 

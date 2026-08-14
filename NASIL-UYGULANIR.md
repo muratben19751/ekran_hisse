@@ -54,3 +54,41 @@ mevcut listen olduğu gibi açılır.
 Qt penceresi macOS vibrancy (arka plan bulanıklığı) veremez; tasarımdaki blur yerine
 panel opaklığı 236'ya çekildi. Gerçek vibrancy istersen `main.py` içindeki objc
 köprüsüyle `NSVisualEffectView` eklenebilir — istersen onu da yazayım.
+
+## 𝕏 (Twitter) akışı — RSSHub kurulumu
+
+𝕏 sekmesi tweet'leri **self-hosted RSSHub** üzerinden çeker. (Nitter ekosistemi
+çöktüğü için eski köprü kaldırıldı.) RSSHub, X'in `auth_token` cookie'siyle gerçek
+keyword araması yapar; token **RSSHub tarafında** tutulur, EkranHisse'de saklanmaz.
+
+### 1. auth_token cookie'sini al
+1. Bir tarayıcıda X/Twitter'a giriş yap (**burner/ikincil hesap önerilir** — token
+   sızarsa ana hesabın etkilenmesin).
+2. Geliştirici Araçları → **Application** (Chrome) / **Storage** (Firefox) → Cookies →
+   `https://x.com` → `auth_token` değerini kopyala.
+
+### 2. RSSHub'ı Docker'da başlat
+```
+docker run -d --name rsshub -p 1200:1200 \
+  -e TWITTER_AUTH_TOKEN=<auth_token_cookie_değeri> \
+  diygod/rsshub
+```
+Birden çok token'ı virgülle ayırıp rotasyon yapabilirsin (rate-limit'e karşı).
+
+### 3. Doğrula
+```
+curl "http://localhost:1200/twitter/keyword/THYAO"
+```
+Geçerli bir `<rss>` XML ve güncel `pubDate` görmelisin. Bunu görüyorsan EkranHisse
+𝕏 sekmesi de dolacaktır.
+
+### 4. (Opsiyonel) Uzak RSSHub
+RSSHub'ı başka bir makinede/portta çalıştırıyorsan tabanı `RSSHUB_URL` ile ver
+(varsayılan `http://localhost:1200`). Sır değil; Keychain veya `~/.ekranhisse/notes_config.env`:
+```
+security add-generic-password -s ekranhisse -a RSSHUB_URL -w 'http://sunucu:1200'
+```
+Uygulama çalışırken eklersen yeniden başlatman gerekir (config import anında okunur).
+
+> Not: RSSHub kapalıysa 𝕏 sekmesi "RSSHub kapalı" durumu gösterir; uygulama donmaz
+> (istekler arka planda çalışır). Konteyneri başlatınca akış kendiliğinden dolar.

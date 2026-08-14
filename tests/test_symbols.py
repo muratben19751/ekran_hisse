@@ -75,7 +75,65 @@ def test_load_rejects_invalid_special_entries(tmp_path, monkeypatch):
         },
     }), encoding="utf-8")
     monkeypatch.setattr(symbols, "_PATH", str(bad))
-    bist, specials = symbols._load()
+    bist, specials, us = symbols._load()
     assert bist == ["THYAO", "AKBNK"]              # 123 elendi
     assert set(specials.keys()) == {"GOOD"}        # yalnızca geçerli girdi
     assert specials["GOOD"] == {"yf": "GC=F", "tv": "OANDA:XAUUSD"}
+    assert us == {}                                 # us bloğu yoksa boş
+
+
+# ── US (NASDAQ/NYSE) evreni + çözümleme ───────────────────────────────────────
+def test_tv_symbol_us():
+    assert symbols.tv_symbol("AAPL") == "NASDAQ:AAPL"
+    assert symbols.tv_symbol("KO") == "NYSE:KO"
+
+
+def test_yf_ticker_us_no_suffix():
+    # US hissesi yfinance'ta prefix'siz/suffix'siz düz ticker
+    assert symbols.yf_ticker("AAPL") == "AAPL"
+    assert symbols.yf_ticker("KO") == "KO"
+
+
+def test_us_priority_bist_first():
+    # BIST ∩ US kesişimindeki ticker (CENTA) BIST kazanır — karar #2 önceliği
+    assert "CENTA" in symbols.BIST_SYMBOLS
+    assert symbols.tv_symbol("CENTA") == "BIST:CENTA"
+    assert symbols.yf_ticker("CENTA") == "CENTA.IS"
+    assert not symbols.is_us("CENTA")
+
+
+def test_is_us():
+    assert symbols.is_us("AAPL")
+    assert symbols.is_us("aapl")            # case-insensitive
+    assert not symbols.is_us("THYAO")       # BIST
+    assert not symbols.is_us("XAUUSD")      # special
+    assert not symbols.is_us("ZZZZZ")       # bilinmeyen
+
+
+def test_unknown_still_bist_fallback():
+    # US'te de BIST'te de olmayan → mevcut BIST fallback (geriye uyum, bozulma yok)
+    assert symbols.tv_symbol("ZZZZZ") == "BIST:ZZZZZ"
+    assert symbols.yf_ticker("ZZZZZ") == "ZZZZZ.IS"
+
+
+def test_us_not_in_known():
+    # US evreni KNOWN'a eklenmez (StockPicker autocomplete şişmesin)
+    assert not symbols.is_known("AAPL")
+
+
+def test_load_parses_and_reverses_us_block(tmp_path, monkeypatch):
+    import json
+    p = tmp_path / "symbols.json"
+    p.write_text(json.dumps({
+        "bist": ["THYAO"],
+        "specials": {},
+        "us": {
+            "NASDAQ": ["AAPL", "MSFT", 123],       # 123 elenmeli
+            "NYSE": ["KO", "  ", ""],               # boş/whitespace elenmeli
+            "AMEX": ["SEB"],                         # tanınmayan borsa → elenmeli
+            "BADVAL": "liste-değil",                 # elenmeli
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(symbols, "_PATH", str(p))
+    _bist, _specials, us = symbols._load()
+    assert us == {"AAPL": "NASDAQ", "MSFT": "NASDAQ", "KO": "NYSE"}

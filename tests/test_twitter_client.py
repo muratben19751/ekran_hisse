@@ -1,7 +1,9 @@
-"""twitter_client.py — Nitter RSS köprüsü testleri (urllib mock).
+"""twitter_client.py — RSSHub keyword köprüsü testleri (urllib mock).
 
-X API v2 402 sonrası veri Nitter search RSS'ten çekilir. Bearer token yok;
-çoklu instance fallback + 429 backoff + X-operatör sıyırma test edilir.
+Nitter ekosistemi çöktü; veri self-hosted RSSHub /twitter/keyword/<terim>
+RSS'ten çekilir. RSSHUB_URL config'ten okunur (boşsa localhost:1200). X-stili
+sorgudan sembol çıkarma, sembol başına ayrı istek, birleşik dedup+sort ve 429
+backoff test edilir. _parse_item sözleşmesi korunduğu için RSS helper aynı kalır.
 """
 
 import os
@@ -19,9 +21,9 @@ import twitter_client as tc
 
 
 @pytest.fixture(autouse=True)
-def _instances(monkeypatch):
-    """Tek sabit instance varsay (fallback döngüsü ayrı test edilir)."""
-    monkeypatch.setattr(tc.config, "NITTER_INSTANCES", "https://nitter.test")
+def _base(monkeypatch):
+    """Sabit RSSHub tabanı varsay."""
+    monkeypatch.setattr(tc.config, "RSSHUB_URL", "http://rsshub.test")
 
 
 def _rss(items):
@@ -31,8 +33,8 @@ def _rss(items):
         parts.append(
             f"<item>"
             f"<title>{text}</title>"
-            f"<link>https://nitter.test/{creator}/status/{tid}#m</link>"
-            f"<guid>https://nitter.test/{creator}/status/{tid}#m</guid>"
+            f"<link>https://twitter.com/{creator}/status/{tid}</link>"
+            f"<guid>https://twitter.com/{creator}/status/{tid}</guid>"
             f"<dc:creator xmlns:dc='http://purl.org/dc/elements/1.1/'>@{creator}</dc:creator>"
             f"<pubDate>{pub}</pubDate>"
             f"</item>"
@@ -95,7 +97,7 @@ def test_fetch_recent_html_unescape():
 
 
 def test_fetch_recent_leading_whitespace():
-    """Bazı instance'lar XML öncesi boşluk ekler → yine de parse edilmeli."""
+    """Bazı yanıtlar XML öncesi boşluk ekler → yine de parse edilmeli."""
     body = b"  \n  " + _rss([("3", "ISCTR", "can", "Wed, 12 Aug 2026 09:00:00 GMT")])
     with patch("urllib.request.urlopen", return_value=_resp(body)):
         tweets, _users, err = _collect(tc.fetch_recent, "ISCTR")
@@ -115,40 +117,73 @@ def test_fetch_ids_success():
     assert ids == {"1", "2"}
 
 
-# ── kaynak yok (tüm instance düşer) ─────────────────────────────────────────
-def test_all_instances_down_returns_error(monkeypatch):
-    monkeypatch.setattr(tc.config, "NITTER_INSTANCES", "https://a.test,https://b.test")
-
+# ── kaynak yok (RSSHub kapalı) ────────────────────────────────────────────────
+def test_rsshub_down_returns_error():
     def side(req, timeout=None):
-        raise _http_error(500)
+        raise urllib.error.URLError("Connection refused")
 
     with patch("urllib.request.urlopen", side_effect=side):
         tweets, users, err = _collect(tc.fetch_recent, "THYAO")
     assert tweets == [] and users == {}
+    assert err == "RSSHub kapalı"
+
+
+def test_http_error_returns_error():
+    def side(req, timeout=None):
+        raise _http_error(500)
+
+    with patch("urllib.request.urlopen", side_effect=side):
+        _tweets, _users, err = _collect(tc.fetch_recent, "THYAO")
     assert err == "hata 500"
 
 
-# ── çoklu instance fallback ──────────────────────────────────────────────────
-def test_instance_fallback(monkeypatch):
-    """İlk instance düşer, ikincisi başarılı → veri ikinciden gelir."""
-    monkeypatch.setattr(tc.config, "NITTER_INSTANCES", "https://a.test,https://b.test")
-    body = _rss([("9", "SASA", "ece", "Wed, 12 Aug 2026 09:00:00 GMT")])
+# ── çoklu sembol: sembol başına ayrı istek + birleşik dedup/sort ─────────────
+def test_multi_symbol_separate_requests_and_merge():
     calls = []
 
     def side(req, timeout=None):
         calls.append(req.full_url)
-        if "a.test" in req.full_url:
-            raise _http_error(503)
-        return _resp(body)
+        if "THYAO" in req.full_url:
+            return _resp(_rss([("1", "THYAO", "ali", "Wed, 12 Aug 2026 09:00:00 GMT")]))
+        return _resp(_rss([("2", "AKBNK", "veli", "Wed, 12 Aug 2026 10:00:00 GMT")]))
+
+    query = "(THYAO OR AKBNK) lang:tr -is:retweet"
+    with patch("urllib.request.urlopen", side_effect=side):
+        tweets, _users, err = _collect(tc.fetch_recent, query)
+
+    assert err is None
+    # her sembole ayrı istek
+    assert any("/twitter/keyword/THYAO" in u for u in calls)
+    assert any("/twitter/keyword/AKBNK" in u for u in calls)
+    # birleşik + created_at azalan sıralı (AKBNK 10:00 önce)
+    assert [t["id"] for t in tweets] == ["2", "1"]
+
+
+def test_multi_symbol_dedup_by_id():
+    """Aynı tweet iki sembolde de geçerse tek kez görünür."""
+    def side(req, timeout=None):
+        return _resp(_rss([("7", "THYAO ve AKBNK", "ali", "Wed, 12 Aug 2026 09:00:00 GMT")]))
 
     with patch("urllib.request.urlopen", side_effect=side):
-        ids, err = _collect(tc.fetch_ids, "SASA")
+        tweets, _users, err = _collect(tc.fetch_recent, "(THYAO OR AKBNK) lang:tr")
     assert err is None
-    assert ids == {"9"}
-    assert any("a.test" in u for u in calls) and any("b.test" in u for u in calls)
+    assert [t["id"] for t in tweets] == ["7"]
 
 
-# ── 429 rate-limit (aynı instance içinde retry) ──────────────────────────────
+def test_partial_success_no_error():
+    """Bir sembol düşse de en az biri başarılıysa hata gösterilmez."""
+    def side(req, timeout=None):
+        if "THYAO" in req.full_url:
+            raise _http_error(500)
+        return _resp(_rss([("2", "AKBNK", "veli", "Wed, 12 Aug 2026 10:00:00 GMT")]))
+
+    with patch("urllib.request.urlopen", side_effect=side):
+        tweets, _users, err = _collect(tc.fetch_recent, "(THYAO OR AKBNK) lang:tr")
+    assert err is None
+    assert [t["id"] for t in tweets] == ["2"]
+
+
+# ── 429 rate-limit (aynı istekte retry) ──────────────────────────────────────
 def test_429_retries_then_succeeds(monkeypatch):
     monkeypatch.setattr(tc.time, "sleep", lambda s: None)
     body = _rss([("1", "x", "ali", "Wed, 12 Aug 2026 09:00:00 GMT")])
@@ -185,36 +220,47 @@ def test_retry_after_capped(monkeypatch):
     assert waited and waited[0] <= tc._MAX_BACKOFF
 
 
-# ── X-özel operatör sıyırma ──────────────────────────────────────────────────
-def test_clean_query_strips_x_operators():
-    assert tc._clean_query("(THYAO OR AKBNK) lang:tr -is:retweet") == "(THYAO OR AKBNK)"
-    assert tc._clean_query("THYAO lang:tr") == "THYAO"
-    # sıyırma sonrası boş kalırsa orijinal korunur
-    assert tc._clean_query("lang:tr") == "lang:tr"
+# ── keyword çıkarma ──────────────────────────────────────────────────────────
+def test_keyword_from_query_multi():
+    assert tc._keyword_from_query("(THYAO OR AKBNK) lang:tr -is:retweet") == ["THYAO", "AKBNK"]
 
 
-def test_clean_query_passed_to_url():
-    """URL'de temizlenmiş sorgu (operatörsüz) kullanılmalı."""
-    body = _rss([])
+def test_keyword_from_query_single():
+    assert tc._keyword_from_query("THYAO lang:tr -is:retweet") == ["THYAO"]
+
+
+def test_keyword_from_query_operators_only_fallback():
+    # sıyırma sonrası boş kalırsa sorgunun tamamı tek terim
+    assert tc._keyword_from_query("lang:tr") == ["lang:tr"]
+    assert tc._keyword_from_query("") == []
+
+
+def test_keyword_from_query_dedup():
+    assert tc._keyword_from_query("(THYAO OR THYAO) lang:tr") == ["THYAO"]
+
+
+def test_keyword_used_in_url():
+    """URL'de keyword route ve operatörsüz terim kullanılmalı."""
     captured = []
 
     def side(req, timeout=None):
         captured.append(req.full_url)
-        return _resp(body)
+        return _resp(_rss([]))
 
     with patch("urllib.request.urlopen", side_effect=side):
-        _collect(tc.fetch_ids, "(THYAO OR AKBNK) lang:tr -is:retweet")
+        _collect(tc.fetch_ids, "THYAO lang:tr -is:retweet")
     assert captured
+    assert "/twitter/keyword/THYAO" in captured[0]
     assert "lang" not in captured[0]
     assert "is%3Aretweet" not in captured[0] and "is:retweet" not in captured[0]
 
 
-# ── instance yapılandırması ──────────────────────────────────────────────────
-def test_instances_from_config(monkeypatch):
-    monkeypatch.setattr(tc.config, "NITTER_INSTANCES", "https://x.test/, https://y.test")
-    assert tc._instances() == ["https://x.test", "https://y.test"]
+# ── RSSHub tabanı yapılandırması ─────────────────────────────────────────────
+def test_base_from_config(monkeypatch):
+    monkeypatch.setattr(tc.config, "RSSHUB_URL", "http://x.test:1200/")
+    assert tc._rsshub_base() == "http://x.test:1200"
 
 
-def test_instances_default_when_empty(monkeypatch):
-    monkeypatch.setattr(tc.config, "NITTER_INSTANCES", "")
-    assert tc._instances() == tc._DEFAULT_INSTANCES
+def test_base_default_when_empty(monkeypatch):
+    monkeypatch.setattr(tc.config, "RSSHUB_URL", "")
+    assert tc._rsshub_base() == tc._DEFAULT_RSSHUB

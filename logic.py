@@ -195,7 +195,7 @@ def sanitize_stocks(stocks):
         if not isinstance(sym, str) or not sym.strip():
             continue
         rec = {"symbol": sym}
-        for k in ("entry", "exit", "qty"):
+        for k in ("entry", "exit", "qty", "mult"):
             if k in s:
                 v = s[k]
                 rec[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
@@ -203,14 +203,16 @@ def sanitize_stocks(stocks):
     return out
 
 
-def compute_pnl(entry, price, qty=None):
-    """Giriş fiyatı + güncel fiyat (+ opsiyonel adet) → (tutar, yüzde).
+def compute_pnl(entry, price, qty=None, mult=None):
+    """Giriş fiyatı + güncel fiyat (+ opsiyonel adet, çarpan) → (tutar, yüzde).
 
     Döndürür `(amount, pct)`:
       - `entry`/`price` None ya da `entry == 0` ise `(None, None)` — hesap yok.
       - `pct` = `(price - entry) / entry * 100` (giriş+fiyat varsa her zaman).
-      - `amount` = `(price - entry) * qty` yalnızca `qty` geçerli bir sayı ve `> 0`
-        ise; aksi halde `None` (adet opsiyonel — girilmezse yalnız yüzde).
+      - `amount` = `(price - entry) * qty * mult` yalnızca `qty` geçerli bir sayı ve
+        `> 0` ise; aksi halde `None` (adet opsiyonel — girilmezse yalnız yüzde).
+        `mult` VİOP gibi kontrat çarpanıdır (ör. 100); geçersiz/None/≤0 ise 1 sayılır.
+        Yüzdeyi ETKİLEMEZ — sadece tutarı ölçekler.
     Long/short ayrımı yok: negatif tutar/yüzde zararı gösterir.
     """
     if entry is None or price is None or entry == 0:
@@ -218,7 +220,8 @@ def compute_pnl(entry, price, qty=None):
     pct = (price - entry) / entry * 100
     amount = None
     if isinstance(qty, (int, float)) and not isinstance(qty, bool) and qty > 0:
-        amount = (price - entry) * qty
+        m = mult if isinstance(mult, (int, float)) and not isinstance(mult, bool) and mult > 0 else 1
+        amount = (price - entry) * qty * m
     return amount, pct
 
 

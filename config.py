@@ -87,8 +87,12 @@ TV_SESSION_ID        = get("TV_SESSION_ID")
 # Opsiyonel override: doluysa overlay._twitter_query() bunu aynen kullanır,
 # boşsa logic.twitter_query() izlenen sembollerden üretir.
 TWITTER_QUERY        = get("TWITTER_QUERY")
-# Nitter instance'ları (virgülle çoklu). Boşsa twitter_client dahili varsayılan
-# listesini kullanır. Sır DEĞİL (public URL) — Keychain/env opsiyonel.
+# RSSHub köprü tabanı (𝕏/Twitter keyword akışı). Boşsa http://localhost:1200
+# varsayılır. Sır DEĞİL (public/yerel URL) — Keychain/env opsiyonel. RSSHub'ın
+# TWITTER_AUTH_TOKEN'ı RSSHub tarafında ayarlanır, EkranHisse'de tutulmaz.
+RSSHUB_URL           = get("RSSHUB_URL")
+# DEPRECATED: Nitter köprüsü kaldırıldı (ekosistem çöktü). Anahtar geriye uyum
+# için okunuyor ama artık kullanılmıyor; RSSHUB_URL kullanın.
 NITTER_INSTANCES     = get("NITTER_INSTANCES")
 
 # Not: Bu sabitler import anında bir kez okunur. Uygulama açıkken Keychain'e/env'e

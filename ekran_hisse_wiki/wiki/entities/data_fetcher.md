@@ -1,11 +1,12 @@
 ---
 title: DataFetcher
 type: entity
-summary: TradingView WebSocket üzerinden BIST fiyatı ve RSI çeken, yfinance bulk-fetch kullanan veri katmanı; auth token thread-safe cache, NaN/ZeroDivision ve falsy-zero koruması içerir.
+summary: TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı ve RSI çeken, yfinance bulk-fetch (FX/altın/kripto) kullanan veri katmanı; auth token thread-safe cache, NaN/ZeroDivision, falsy-zero ve tam-sembol eşleme (borsa çakışması) koruması içerir.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
-last_updated: 2026-08-11
+  - sources/07_oturum_2026-08-14.md
+last_updated: 2026-08-14
 ---
 
 # DataFetcher
@@ -17,9 +18,10 @@ TradingView WebSocket quote session açar; `lp`, `chp`, `ch`, `volume`, `average
 
 **Fix (2026-08-07):** `price = lp or last_price` → `lp if lp is not None else last_price` — `0.0` fiyatı eksik veri sayılmıyordu; düzeltildi.
 **Fix (2026-08-11):** `if price` → `if price is not None` — `0.0` fiyatlı semboller artık `needed` setinden çıkarılıyor, 15 sn timeout tetiklenmiyor.
+**Fix (2026-08-14 — tam-sembol eşleme):** Dönen fiyat eskiden `sym_full.split(":")[-1]` ile eşlenirdi; `NYSE:KO` ve `BIST:KO` ikisi de `"KO"`ya çökerdi (borsa çakışması). Artık `on_open`'da gönderilen tam TV sembolü → kullanıcı sembolü haritası (`{tv_symbol(s).upper(): s.upper()}`) tutulur; `on_message` dönen tam `n` (prefix'li) ile geri-eşler, `needed` seti tam TV sembolü bazlıdır. ABD hisse desteğinin (bkz. [[symbols]]) ön koşulu. Beklenmedik biçimli `n` için `split(":")[-1]` fallback korunur.
 
 ## fetch_all(symbols, callback)
-BIST sembollerini `fetch_tv_prices` ile, özel sembolleri tek bir `yf.download()` çağrısıyla çeker. Tüm özel semboller tek thread'de toplu çekilir — N HTTP bağlantısı yerine 1.
+BIST **ve ABD** sembollerini `fetch_tv_prices` ile (ikisi de `is_special` DEĞİL → `bist_syms` grubu, TV WS US destekli), özel sembolleri (FX/altın/endeks/kripto) tek bir `yf.download()` çağrısıyla çeker. Tüm özel semboller tek thread'de toplu çekilir — N HTTP bağlantısı yerine 1. (`_run_bist` adı tarihsel; ABD hisseleri de bu daldan gider.)
 
 ## fetch_tv_rsi(symbol, intervals)
 Ayrı bir TV chart session açar; 5/15/30/60 dk RSI hesaplar. `_calc_rsi()` ile Wilder RSI. Sonuç: `{5: x, 15: x, 30: x, 60: x}`.
@@ -32,7 +34,7 @@ Ayrı bir TV chart session açar; 5/15/30/60 dk RSI hesaplar. `_calc_rsi()` ile 
 - `math.isnan(price) or math.isnan(prev_p) or prev_p == 0` koruması eklendi — NaN UI'a taşınmıyor, ZeroDivision yutulmuyor
 
 ## TV Auth
-`_get_tv_auth_token()` — TradingView `sessionid` çereziyle disclaimer sayfasından `auth_token` kazır. `_tv_auth_token_lock` ile thread-safe cache. **Açık sorun:** token süresi dolunca cache temizlenmez; uygulama yeniden başlatılmalı.
+`_get_tv_auth_token()` — TradingView `sessionid` çereziyle disclaimer sayfasından `auth_token` kazır. `_tv_auth_token_lock` ile thread-safe cache. **Açık sorun:** token süresi dolunca cache temizlenmez; uygulama yeniden başlatılmalı. **Not (2026-08-14):** `TV_SESSION_ID` boşken unauthorized token çoklu-sembol RSI'da "exceed limit of series in the session" verebilir (fiyatlar etkilenmez); session ID ile limit artar.
 
 ## Bağımlılıklar
 `websocket-client`, `requests`, `yfinance` — `requirements.txt`'te listeleniyor.

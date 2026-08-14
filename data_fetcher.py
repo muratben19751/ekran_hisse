@@ -90,11 +90,20 @@ def _parse_packets(data: str) -> list:
 
 
 def fetch_tv_prices(symbols: list) -> dict:
-    """TV WebSocket'e bağlan, fiyatları al, kapat. {symbol: (price, chp, vol, avg_vol)}"""
+    """TV WebSocket'e bağlan, fiyatları al, kapat. {symbol: (price, chp, vol, avg_vol)}
+
+    Dönen fiyat, gönderilen TAM TV sembolü (ör. 'NYSE:KO') ile orijinal kullanıcı
+    sembolüne (ör. 'KO') geri-eşlenir. Böylece aynı ticker'ın farklı borsalardaki
+    versiyonları (BIST:KO vs NYSE:KO) çakışmaz; eski split(':')[-1] eşlemesi bunu
+    ayırt edemiyordu.
+    """
     results = {}
     done_event = threading.Event()
-    needed = set(s.upper() for s in symbols)
     quote_session = _rand_id("qs_")
+    # tam TV sembolü ('NASDAQ:AAPL') → kullanıcı sembolü ('AAPL'). Büyük harfe
+    # normalize: TV dönen 'n' alanını da upper'layıp bununla eşleriz.
+    tv_to_user = {sym_universe.tv_symbol(s).upper(): s.upper() for s in symbols}
+    needed = set(tv_to_user.keys())
 
     def on_open(ws):
         token = _get_tv_auth_token()
@@ -119,7 +128,10 @@ def fetch_tv_prices(symbols: list) -> dict:
                 if len(p) < 2:
                     continue
                 sym_full = p[1].get("n", "")
-                sym = sym_full.split(":")[-1].upper()
+                sym_full_u = sym_full.upper()
+                # Tam TV sembolüyle (borsa prefix'li) geri-eşle; bulunamazsa son
+                # parçaya düş (geriye uyum — beklenmedik biçimli 'n' için).
+                sym = tv_to_user.get(sym_full_u) or sym_full.split(":")[-1].upper()
                 v = p[1].get("v", {})
                 lp = v.get("lp")
                 price = lp if lp is not None else v.get("last_price")
@@ -135,9 +147,9 @@ def fetch_tv_prices(symbols: list) -> dict:
                     price is not None
                     and not (isinstance(price, float) and math.isnan(price))
                 )
-                if price_ok and sym in needed:
+                if price_ok and sym_full_u in needed:
                     results[sym] = (price, pchp, vol, avg_vol)
-                    needed.discard(sym)
+                    needed.discard(sym_full_u)
                     if not needed:
                         done_event.set()
 

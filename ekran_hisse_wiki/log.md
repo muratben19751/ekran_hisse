@@ -152,3 +152,28 @@ artık satırda tutar+% görünür (compute_pnl merkezî).
 
 **Lint (sonrası):** backlinks + index yeniden üretilecek; hedef broken_links/orphans/
 missing_summary/missing_frontmatter/stale/stubs = 0.
+
+---
+
+## 2026-08-14 — VİOP çarpanı + ABD hisseleri (NYSE/NASDAQ) + pill fix
+
+**Kaynak:** `sources/07_oturum_2026-08-14.md` (immutable snapshot).
+
+**Güncellenen Layer 2 sayfaları (5):**
+- symbols: `US_SYMBOLS` ters harita + çözümleme önceliği (SPECIALS→BIST→US→fallback),
+  `is_us`, `_load` 3-tuple, ABD hisse desteği bölümü.
+- data_fetcher: `fetch_tv_prices` tam-sembol eşleme fix'i (NYSE:KO vs BIST:KO çakışması),
+  fetch_all US açıklaması, RSI "exceed limit" notu.
+- stock_row: iki-satırlı layout (meta satırı), yüzde pill düzeltmesi, VİOP çarpanı (mult),
+  `levels_changed` 5-arg.
+- overlay_window: TargetSheet Çarpan alanı, `_update_levels(...mult)`, 2026-08-14 fix'leri,
+  sekme açıklaması (BIST+ABD).
+- architecture_overview: modül haritası (symbols US + twitter RSSHub), stocks.json şema
+  (`mult`), NITTER_INSTANCES→RSSHUB_URL notu.
+
+**Çelişki/boşluk kapatma:** stock_row layout'u bayattı (K/Z+RSI ayrı sağ sütun sanılıyordu;
+gerçekte artık ana satır altındaki meta satırında). architecture_overview'da twitter_client
+hâlâ "Nitter" diyordu → RSSHub'a çekildi (kod 2026-08-13'te geçmişti).
+
+**Lint (sonrası):** broken_links/orphans/missing_summary/missing_frontmatter/stale/stubs = 0.
+Backlinks 9 sayfada tazelendi, index yeniden üretildi.

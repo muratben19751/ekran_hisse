@@ -6,7 +6,8 @@ sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
   - sources/03_deepr_review_round2_2026-08-12.md
-last_updated: 2026-08-13
+  - sources/07_oturum_2026-08-14.md
+last_updated: 2026-08-14
 ---
 
 # Mimari Genel Bakış
@@ -53,8 +54,8 @@ TradingView WebSocket
 | `overlay.py` | Tüm UI: `OverlayWindow`, `StockRow`, `Sparkline`, sheet'ler, floating/monitör |
 | `data_fetcher.py` | TV WebSocket fiyat/RSI + yfinance özel semboller; NaN/timeout korumalı |
 | [[paths]] | `~/.ekranhisse` yol politikası tek kaynak (`DATA_DIR`/`ensure_data_dir`/`data_file`) |
-| [[symbols]] | Sembol evreni tek kaynak (`symbols.json` → BIST ∪ SPECIALS = KNOWN; yf & tv eşlemesi) |
-| [[twitter_client]] | 𝕏 ağ katmanı (UI'dan ayrık; Nitter search RSS köprüsü — bearer'sız, çoklu instance fallback + 429 backoff) |
+| [[symbols]] | Sembol evreni tek kaynak (`symbols.json` → BIST ∪ SPECIALS = KNOWN + US_SYMBOLS; yf & tv eşlemesi, ABD hisseleri 2026-08-14) |
+| [[twitter_client]] | 𝕏 ağ katmanı (UI'dan ayrık; self-hosted RSSHub keyword köprüsü — 2026-08-13'te Nitter'dan geçildi; sembol başına istek + 429 backoff) |
 | `notes_api_client.py` | GitHub Gist not senkronu (last-write-wins) |
 | `config.py` | Sır okuma: Keychain-öncelikli, `.env` geçiş fallback |
 | `applog.py` | Merkezî logger (konsol + `~/Library/Logs/EkranHisse.log`) |
@@ -91,9 +92,10 @@ açıkken eklenen sır süreç yeniden başlatılana dek görülmez.
 `GIST_ID` boşsa `notes_api_client._gist_api()` anında `ValueError` fırlatır — sessiz
 geçersiz URL üretilmez.
 
-`config.NITTER_INSTANCES` (2026-08-13) sır DEĞİL — public Nitter URL listesi (virgülle
-çoklu); boşsa [[twitter_client]] kod içi varsayılan listesini kullanır. Keychain/env'den
-okunabilir ama zorunlu değil.
+`config.RSSHUB_URL` (2026-08-13) sır DEĞİL — self-hosted RSSHub köprü tabanı; boşsa
+[[twitter_client]] `http://localhost:1200` varsayar. RSSHub'ın `TWITTER_AUTH_TOKEN`'ı
+RSSHub tarafında tutulur, EkranHisse'de saklanmaz. Eski `config.NITTER_INSTANCES`
+DEPRECATED (Nitter ekosistemi çöktü); geriye uyum için okunuyor ama kullanılmıyor.
 
 ## Kalıcılık ve yol politikası
 Tüm kalıcı veri (`stocks.json`, `tw_symbols.json`, `notes_config.env`, `.ekranhisse.lock`)
@@ -101,10 +103,12 @@ Tüm kalıcı veri (`stocks.json`, `tw_symbols.json`, `notes_config.env`, `.ekra
 artık bundle Resources'a YAZILMAZ (kullanıcı verisi; `.gitignore`'da). Atomik JSON
 yazımı: tmp dosyaya yaz + `os.replace` (yazma hatasında mevcut dosya bozulmaz).
 
-`stocks.json` kaydı `{"symbol", "entry", "exit", "qty"}` (2026-08-13'te `qty`/adet
-eklendi — [[stock_row]] K/Z tutar hesabı için); `entry`/`exit`/`qty` opsiyonel.
-`logic.sanitize_stocks` dıştan gelen kaydı güvenli hale getirir (sayı değilse `None`,
-`symbol` yoksa satır düşer) — kullanıcı verisi asla silinmez.
+`stocks.json` kaydı `{"symbol", "entry", "exit", "qty", "mult"}` (2026-08-13'te
+`qty`/adet, 2026-08-14'te `mult`/VİOP çarpanı eklendi — [[stock_row]] K/Z tutar
+hesabı için); `entry`/`exit`/`qty`/`mult` opsiyonel. `logic.sanitize_stocks` dıştan
+gelen kaydı güvenli hale getirir (sayı değilse `None`, `symbol` yoksa satır düşer) —
+kullanıcı verisi asla silinmez. ABD hisseleri düz `"AAPL"` olarak saklanır; borsa
+prefix'i runtime'da [[symbols]] `tv_symbol`/`yf_ticker` ile çözülür (şema değişmedi).
 
 **UI tercihleri (2026-08-13):** aynı dizinde iki kalıcı UI dosyası daha:
 `ui_scale.json` (font ölçeği `_FONT_SCALE`) ve `ui_geom.json` (panel genişliği +

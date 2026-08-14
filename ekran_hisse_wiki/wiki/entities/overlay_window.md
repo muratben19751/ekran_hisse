@@ -7,7 +7,8 @@ sources:
   - sources/02_deepr_review_2026-08-11.md
   - sources/04_oturum_2026-08-13.md
   - sources/06_reorder_pnl_2026-08-13.md
-last_updated: 2026-08-13
+  - sources/07_oturum_2026-08-14.md
+last_updated: 2026-08-14
 ---
 
 # OverlayWindow
@@ -17,9 +18,9 @@ overlay olarak ekranın **sağ-alt** köşesine yaslı konumlanır. Sekme çubu�
 ile açılıp kapanır.
 
 ## Sekmeler
-- **Hisse (◧)** — BIST hisse takip listesi, fiyat + sparkline + RSI
+- **Hisse (◧)** — BIST + ABD (NYSE/NASDAQ) hisse takip listesi, fiyat + sparkline + RSI
 - **Notlar (✎)** — GitHub Gist üzerinden senkronlanan not paneli
-- **Twitter/X (𝕏)** — Takip edilen hesapların tweet akışı
+- **Twitter/X (𝕏)** — Takip edilen sembollerin tweet akışı (RSSHub köprüsü, bkz. [[twitter_client]])
 
 ## Başlık satırı kontrolleri (2026-08-11)
 Her sayfanın başlık satırında üç buton bulunur:
@@ -80,13 +81,15 @@ bellek+diskten yeniden doğar).
 - Twitter poll: 60 sn
 - Outside-click fallback: 150 ms (global monitor aktifse durur)
 
-## Hisse yönetimi (hedef / adet / taşıma)
+## Hisse yönetimi (hedef / adet / çarpan / taşıma)
 Her [[stock_row]] sağ-tık menüsünden yönetilir:
-- **Hedef belirle…** → `TargetSheet` (giriş / çıkış / **adet**). Adet alanı
-  (2026-08-13) opsiyoneldir; girilirse `logic.compute_pnl` tutar-bazlı K/Z hesaplar.
-  Sonuç `("save", entry, exit_, qty)` → `StockRow.levels_changed(4 arg)` →
-  `OverlayWindow._update_levels` → `stocks.json` (`entry`/`exit`/`qty`).
-- **Hedefi temizle** → üçünü de `None` yapar.
+- **Hedef belirle…** → `TargetSheet` (giriş / çıkış / **adet** / **çarpan**). Adet
+  (2026-08-13) ve çarpan (2026-08-14) opsiyoneldir; girilirse `logic.compute_pnl`
+  tutar-bazlı K/Z hesaplar (`amount = (price-entry)*qty*mult`). Sheet genişliği
+  360→460 (4 alan). Sonuç `("save", entry, exit_, qty, mult)` →
+  `StockRow.levels_changed(5 arg)` → `OverlayWindow._update_levels(sym, e, x, qty, mult)`
+  → `stocks.json` (`entry`/`exit`/`qty`/`mult`).
+- **Hedefi temizle** → dördünü de `None` yapar.
 - **Yukarı/Aşağı taşı** (2026-08-13) → `StockRow.move_requested(sym, ±1)` →
   `_move_stock`: `self.stocks` içinde komşu index takası + `save_stocks` +
   `_rebuild_rows` + `_apply_cached_prices`. Aynı handler grup başlığı taşımasında da
@@ -94,6 +97,17 @@ Her [[stock_row]] sağ-tık menüsünden yönetilir:
   korunur; menü onu keşfedilebilir kılar.
 
 ## Önemli fixler
+
+### 2026-08-14
+- **VİOP çarpanı:** `TargetSheet`'e "Çarpan" alanı (sembol başına serbest, boş/1=normal,
+  100=VİOP) → `logic.compute_pnl(entry, price, qty, mult)` yalnız K/Z **tutarını**
+  ölçekler (yüzde/fiyat/hedef değişmez). `levels_changed` 5-arg, `_update_levels`
+  `mult`'u `stocks.json`'a yazar. Şema geriye uyumlu (bkz. [[stock_row]]).
+- **ABD hisseleri (NYSE/NASDAQ):** prefix'siz sembol otomatik çözümlenir (bkz.
+  [[symbols]] + [[data_fetcher]]); ekleme akışı (`_add_from_search`) değişmedi —
+  `AAPL` yazılır, `tv_symbol` `NASDAQ:AAPL`'a çözer. `stocks.json` düz `"AAPL"` saklar.
+- **Yüzde pill'i düzeltmesi:** `lbl_pct` sabit boyut + radius=yükseklik/2 + dikey
+  ortala → 1.4x ölçekte kutular satıra oturur, komşu satıra taşmaz (bkz. [[stock_row]]).
 
 ### 2026-08-13
 - Kenar/köşe boyutlandırma + `ui_geom.json` kalıcılığı eklendi (yukarıda); `PANEL_W`/`ekran//2` sabitleri → çalışma zamanı `self._panel_w`/`self._win_h`

@@ -1,8 +1,10 @@
-"""EkranHisse — Twitter/X istemcisi (Nitter RSS köprüsü, ağ katmanı).
+"""EkranHisse — Twitter/X istemcisi (RSSHub keyword köprüsü, ağ katmanı).
 
-X API v2 `search/recent` artık ücretli ve hesap kredisi tükendiğinde HTTP 402
-döndürüyor. Bu modül, aynı public arayüzü koruyarak veriyi **Nitter search RSS**
-üzerinden ücretsiz çeker (bearer token gerekmez). overlay/logic ve callback
+X API v2 `search/recent` ücretli (kredi bitince HTTP 402) ve Nitter ekosistemi
+çöktü (instance'lar 403/kapalı/anti-bot). Bu modül aynı public arayüzü koruyarak
+veriyi **self-hosted RSSHub** `/twitter/keyword/<terim>` route'undan (RSS XML)
+çeker. RSSHub, X `auth_token` cookie'siyle (RSSHub tarafında `TWITTER_AUTH_TOKEN`)
+gerçek keyword search yapar; EkranHisse sır tutmaz. overlay/logic ve callback
 sözleşmesi değişmez:
 
 fetch_recent(query, callback)  → callback((tweets, users, err))
@@ -11,9 +13,9 @@ fetch_ids(query, callback)     → callback((ids_set, err))
 tweets: [{"id","text","created_at","author_id"}]  (created_at ISO8601)
 users:  {author_id: {"username","name"}}
 
-Nitter instance'ları kararsız olabilir; birden çok instance sırayla denenir
-(config.NITTER_INSTANCES ile özelleştirilebilir). HTTP 429'da Retry-After'a
-saygı gösterilir, sonra sıradaki instance'a geçilir.
+RSSHub tabanı config.RSSHUB_URL ile verilir (boşsa http://localhost:1200).
+İzlenen birden çok sembol için her sembole ayrı istek atılır; sonuçlar birleşir,
+id ile tekilleşir, tarihe göre sıralanır. HTTP 429'da Retry-After'a saygı gösterilir.
 """
 
 import html
@@ -29,91 +31,118 @@ from email.utils import parsedate_to_datetime
 import config
 from applog import log
 
-# Bilinen public Nitter instance'ları (kod içi fallback). config.NITTER_INSTANCES
-# doluysa o kullanılır. Instance'lar sık kapanabilir; kullanıcı çalışan birini
-# NITTER_INSTANCES'a ekleyebilir.
-_DEFAULT_INSTANCES = [
-    "https://nitter.net",
-    "https://nitter.privacydev.net",
-    "https://nitter.poast.org",
-    "https://xcancel.com",
-]
+# RSSHub tabanı config'ten okunmazsa yerel Docker varsayılanı.
+_DEFAULT_RSSHUB = "http://localhost:1200"
 
-_MAX_RETRIES = 2          # bir instance'ta 429 sonrası en fazla bu kadar tekrar
+_MAX_RETRIES = 2          # bir istekte 429 sonrası en fazla bu kadar tekrar
 _MAX_BACKOFF = 30         # Retry-After'ı bu saniyeyle sınırla (UI'yı kilitleme)
 _TIMEOUT = 10
 
-# X-özel arama operatörleri (Nitter yok sayar/anlamaz) — köprüde sıyır.
+# X-özel arama operatörleri (keyword route yok sayar) — sorgudan sıyır.
 _X_OPERATOR_RE = re.compile(r"(?:^|\s)-?(?:lang|is|filter):\S+", re.IGNORECASE)
 _STATUS_ID_RE = re.compile(r"/status/(\d+)")
 
 
-def _instances():
-    """config.NITTER_INSTANCES (virgülle çoklu) doluysa onu, yoksa varsayılanı."""
-    raw = (config.NITTER_INSTANCES or "").strip()
-    if raw:
-        insts = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
-        if insts:
-            return insts
-    return _DEFAULT_INSTANCES
+def _rsshub_base():
+    """config.RSSHUB_URL (boşsa yerel Docker varsayılanı), sondaki '/' kırpılı."""
+    raw = (config.RSSHUB_URL or "").strip()
+    return (raw or _DEFAULT_RSSHUB).rstrip("/")
 
 
-def _clean_query(query):
-    """X-özel operatörleri (lang:/is:/filter:) sıyır; arama terimlerini bırak.
+def _keyword_from_query(query):
+    """X-stili sorgudan RSSHub keyword terim listesi çıkar.
 
-    Nitter search bu operatörleri desteklemez; parantez ve OR korunur. Sıyırma
-    sonrası boş kalırsa orijinali aynen kullan (güvenli fallback).
+    logic.twitter_query() '(THYAO OR AKBNK) lang:tr -is:retweet' üretir; RSSHub
+    keyword route bu operatörleri anlamaz. lang:/is:/filter: operatörlerini,
+    parantezleri ve 'OR' ayracını sıyırıp geriye kalan terimleri döndür. Hiç
+    terim kalmazsa (güvenli fallback) sorgunun tamamını tek terim say.
     """
     cleaned = _X_OPERATOR_RE.sub(" ", query)
-    cleaned = " ".join(cleaned.split())
-    return cleaned or query
+    cleaned = cleaned.replace("(", " ").replace(")", " ")
+    terms = [t for t in cleaned.split() if t and t.upper() != "OR"]
+    if terms:
+        # yinelemesiz, sırayı koru
+        seen = set()
+        out = []
+        for t in terms:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
+    stripped = query.strip()
+    return [stripped] if stripped else []
 
 
-def _fetch_rss(query):
-    """Nitter search RSS'i çek; instance'ları sırayla dene.
+def _fetch_one(keyword):
+    """Tek keyword için RSSHub'a istek at; (items, err) döndür.
 
-    Döndürür: (items, err). items = ElementTree <item> düğümleri listesi.
-    err None ise başarılı. Tüm instance'lar düşerse (None, "kaynak yok").
+    items = ElementTree <item> düğümleri. err None ise başarılı. 429'da
+    Retry-After'a (cap'li) saygı gösterip aynı istekte _MAX_RETRIES kez dener.
     """
-    q = urllib.parse.quote(_clean_query(query))
+    base = _rsshub_base()
+    q = urllib.parse.quote(keyword)
+    url = f"{base}/twitter/keyword/{q}"
     last_err = "kaynak yok"
-    for inst in _instances():
-        url = f"{inst}/search/rss?f=tweets&q={q}"
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "Mozilla/5.0 (EkranHisse)"})
-                with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-                    body = resp.read()
-                # Bazı instance'lar XML öncesi boşluk/yeni-satır ekler → ET.fromstring
-                # "declaration not at start" hatası verir; baştaki boşluğu kırp.
-                body = body.lstrip()
-                root = ET.fromstring(body)
-                # RSS: rss/channel/item
-                items = root.findall(".//item")
-                return items, None
-            except urllib.error.HTTPError as e:
-                if e.code == 429 and attempt < _MAX_RETRIES:
-                    retry_after = e.headers.get("Retry-After")
-                    try:
-                        wait = min(_MAX_BACKOFF, int(retry_after)) if retry_after else 5
-                    except ValueError:
-                        wait = 5
-                    log.info("Nitter 429 (%s); %ss bekleniyor (deneme %d)",
-                             inst, wait, attempt + 1)
-                    time.sleep(wait)
-                    continue
-                log.warning("Nitter HTTP hatası (%s): %s", inst, e.code)
-                last_err = "rate-limit" if e.code == 429 else f"hata {e.code}"
-                break   # bu instance'ta 429 dışı hata → sıradaki instance
-            except ET.ParseError as e:
-                log.warning("Nitter RSS parse hatası (%s): %s", inst, e)
-                last_err = "geçersiz yanıt"
-                break
-            except Exception as e:
-                log.warning("Nitter isteği başarısız (%s): %s", inst, e)
-                last_err = "ağ hatası"
-                break
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (EkranHisse)"})
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                body = resp.read()
+            # Bazı yanıtlar XML öncesi boşluk ekler → ET.fromstring "declaration
+            # not at start" hatası verir; baştaki boşluğu kırp.
+            body = body.lstrip()
+            root = ET.fromstring(body)
+            items = root.findall(".//item")
+            return items, None
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < _MAX_RETRIES:
+                retry_after = e.headers.get("Retry-After")
+                try:
+                    wait = min(_MAX_BACKOFF, int(retry_after)) if retry_after else 5
+                except ValueError:
+                    wait = 5
+                log.info("RSSHub 429 (%s); %ss bekleniyor (deneme %d)",
+                         keyword, wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            log.warning("RSSHub HTTP hatası (%s): %s", keyword, e.code)
+            return None, "rate-limit" if e.code == 429 else f"hata {e.code}"
+        except ET.ParseError as e:
+            log.warning("RSSHub RSS parse hatası (%s): %s", keyword, e)
+            return None, "geçersiz yanıt"
+        except (urllib.error.URLError, OSError) as e:
+            # localhost kapalı / bağlantı reddi → RSSHub çalışmıyor olabilir.
+            log.warning("RSSHub'a ulaşılamadı (%s): %s", keyword, e)
+            return None, "RSSHub kapalı"
+        except Exception as e:
+            log.warning("RSSHub isteği başarısız (%s): %s", keyword, e)
+            return None, "ağ hatası"
+    return None, last_err
+
+
+def _fetch_items(query):
+    """Sorgudaki her sembol için RSSHub'ı çek; birleşik (items, err) döndür.
+
+    En az bir sembol başarılıysa kısmi sonuç döner (err None). Tüm semboller
+    düşerse (None, son_hata). Sıralama/tekilleştirme çağıran (fetch_recent/
+    fetch_ids) tarafından _parse_item sonrası yapılır.
+    """
+    keywords = _keyword_from_query(query)
+    if not keywords:
+        return None, "kaynak yok"
+    all_items = []
+    last_err = "kaynak yok"
+    any_ok = False
+    for kw in keywords:
+        items, err = _fetch_one(kw)
+        if err is None:
+            any_ok = True
+            all_items.extend(items)
+        else:
+            last_err = err
+    if any_ok:
+        return all_items, None
     return None, last_err
 
 
@@ -168,19 +197,30 @@ def _parse_item(item):
 
 
 def fetch_recent(query, callback):
-    """Son tweet'leri (metin+kullanıcı) çeker. callback((tweets, users, err))."""
+    """Son tweet'leri (metin+kullanıcı) çeker. callback((tweets, users, err)).
+
+    Çoklu sembolde birleşik akış id ile tekilleşir ve created_at'e göre azalan
+    sıralanır (boş created_at'ler sona).
+    """
     def _run():
-        items, err = _fetch_rss(query)
+        items, err = _fetch_items(query)
         if err is not None:
             callback(([], {}, err))
             return
         tweets = []
         users = {}
+        seen_ids = set()
         for it in items:
             tw, username, name = _parse_item(it)
+            tid = tw["id"]
+            if tid and tid in seen_ids:
+                continue
+            if tid:
+                seen_ids.add(tid)
             tweets.append(tw)
             if username:
                 users[username] = {"username": username, "name": name}
+        tweets.sort(key=lambda t: t.get("created_at") or "", reverse=True)
         callback((tweets, users, None))
     threading.Thread(target=_run, daemon=True).start()
 
@@ -188,7 +228,7 @@ def fetch_recent(query, callback):
 def fetch_ids(query, callback):
     """Sadece tweet id'lerini çeker (poll için ucuz). callback((ids_set, err))."""
     def _run():
-        items, err = _fetch_rss(query)
+        items, err = _fetch_items(query)
         if err is not None:
             callback((set(), err))
             return

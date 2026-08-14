@@ -17,10 +17,29 @@ echo "Proje dizini: $PROJ_DIR"
 echo "Uygulama dosyaları bundle'a kopyalanıyor..."
 RES_DIR="$APP_PATH/Contents/Resources"
 mkdir -p "$RES_DIR"
-for f in main.py overlay.py logic.py data_fetcher.py config.py paths.py \
-         notes_api_client.py twitter_client.py applog.py symbols.py symbols.json; do
+BUNDLE_FILES="main.py overlay.py logic.py data_fetcher.py config.py paths.py \
+         notes_api_client.py twitter_client.py applog.py symbols.py symbols.json"
+for f in $BUNDLE_FILES; do
     cp "$PROJ_DIR/$f" "$RES_DIR/$f"
 done
+
+# ── Doğrulama: bundle kopyaları kaynakla birebir aynı mı? ────────────────────
+# Geçmişte bundle'daki symbols.py/symbols.json kaynaktan ayrışıp (eski, US
+# desteği olmayan sürüm kalınca) ABD hisselerinin fiyat/RSI'ı yanlış borsaya
+# düşmüştü. Kopyalama sonrası her dosyayı karşılaştır; fark varsa kurulumu durdur.
+echo "Bundle-kaynak senkronu doğrulanıyor..."
+SYNC_OK=1
+for f in $BUNDLE_FILES; do
+    if ! cmp -s "$PROJ_DIR/$f" "$RES_DIR/$f"; then
+        echo "  ✗ AYRIŞMA: $f (kaynak ≠ bundle)"
+        SYNC_OK=0
+    fi
+done
+if [ "$SYNC_OK" -ne 1 ]; then
+    echo "HATA: bundle kopyaları kaynakla eşleşmiyor; kurulum durduruldu." >&2
+    exit 1
+fi
+echo "  ✓ Tüm dosyalar senkron"
 
 # Bağımlılıkları kur — launcher /usr/bin/python3 kullandığı için AYNI yorumlayıcıya kur
 echo "Bağımlılıklar kuruluyor..."

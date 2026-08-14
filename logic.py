@@ -36,6 +36,12 @@ def tw_ago(iso, now=None):
         t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
         return iso[11:16]
+    # created_at zaman dilimsiz (naive) gelebilir: RFC822 pubDate '-0000' offseti
+    # veya hiç TZ taşımayan akışlar parsedate_to_datetime'da naive datetime üretir.
+    # Naive t'yi UTC kabul et; aksi halde aware ref ile çıkarma TypeError atıp
+    # tüm tweet render döngüsünü kırardı.
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
     ref = now or datetime.now(timezone.utc)
     secs = (ref - t).total_seconds()
     if secs < 60:
@@ -73,6 +79,28 @@ def parse_price(val: str) -> float:
     if not math.isfinite(f):
         raise ValueError(f"sonlu olmayan sayı: {val!r}")
     return f
+
+
+_USER_SYMBOL_RE = re.compile(r"[A-Z0-9.\-]{1,20}")
+
+
+def is_valid_user_symbol(sym: str) -> bool:
+    """Kullanıcının ekleyebileceği geçerli bir hisse sembolü mü?
+
+    Kaba biçim kontrolü (harf/rakam/nokta/tire, 1-20 karakter) YANINDA bölüm
+    ayracı önekini (_SEP_SYMBOL, '---') açıkça REDDEDER. Aksi halde '---',
+    '---X' gibi girdiler group_stocks tarafından görünmez bir bölüm başlığı
+    olarak yorumlanır (fiyat satırı hiç render edilmez). Ayrıca en az bir
+    harf/rakam içermeli; salt noktalama ('...', '--') sembol değildir.
+    """
+    s = (sym or "").strip().upper()
+    if not _USER_SYMBOL_RE.fullmatch(s):
+        return False
+    if s.startswith(_SEP_SYMBOL):
+        return False
+    if not any(c.isalnum() for c in s):
+        return False
+    return True
 
 
 def parse_sep_symbol(symbol: str):
@@ -198,7 +226,11 @@ def sanitize_stocks(stocks):
         for k in ("entry", "exit", "qty", "mult"):
             if k in s:
                 v = s[k]
-                rec[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+                # Sayı olmayan, bool ve sonlu olmayan (inf/nan) değerleri ele:
+                # elle düzenlenen JSON'da entry:1e400 → inf olur ve compute_pnl
+                # 'inf'/'nan' etiketi bastırır.
+                ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                rec[k] = v if ok else None
         out.append(rec)
     return out
 
@@ -216,6 +248,8 @@ def compute_pnl(entry, price, qty=None, mult=None):
     Long/short ayrımı yok: negatif tutar/yüzde zararı gösterir.
     """
     if entry is None or price is None or entry == 0:
+        return None, None
+    if not (math.isfinite(entry) and math.isfinite(price)):
         return None, None
     pct = (price - entry) / entry * 100
     amount = None

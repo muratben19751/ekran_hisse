@@ -133,3 +133,88 @@ def test_no_project_dir_fallback(tmp_path, monkeypatch):
     import os
     assert os.path.expanduser("~/.ekranhisse/notes_config.env").endswith(
         "/.ekranhisse/notes_config.env")
+
+
+# ── get: düz-metin sır uyarısı yalnızca BİR KEZ tetiklenir ────────────────────
+def test_get_plaintext_secret_warns_once(tmp_path, monkeypatch):
+    # _SECRET_KEYS üyesi bir anahtar (GITHUB_TOKEN) env'de düz metin, Keychain
+    # None → get() çağrılınca uyarı loglanır. Tekrar çağrılırsa uyarı BİR KEZ
+    # kalır (_warned_plaintext bayrağı). Her testte bayrağı sıfırla.
+    f = tmp_path / "cfg.env"
+    f.write_text("GITHUB_TOKEN=plain_secret\n")
+    import config as cfg_mod
+    cfg_mod._warned_plaintext = False
+    monkeypatch.setattr(cfg_mod, "_keychain_get", lambda k: None)
+    _reload_config_env(cfg_mod, str(f))
+
+    calls = []
+    monkeypatch.setattr(cfg_mod.log, "warning",
+                        lambda *a, **k: calls.append((a, k)))
+
+    assert cfg_mod.get("GITHUB_TOKEN") == "plain_secret"
+    assert len(calls) == 1                       # uyarı bir kez
+    # İkinci çağrı yeni uyarı üretmez (bayrak set kaldı).
+    assert cfg_mod.get("GITHUB_TOKEN") == "plain_secret"
+    assert len(calls) == 1
+
+
+def test_get_non_secret_key_no_warning(tmp_path, monkeypatch):
+    # _SECRET_KEYS üyesi OLMAYAN bir anahtar düz metinken uyarı verilmez.
+    f = tmp_path / "cfg.env"
+    f.write_text("GIST_ID=public_gist\n")
+    import config as cfg_mod
+    cfg_mod._warned_plaintext = False
+    monkeypatch.setattr(cfg_mod, "_keychain_get", lambda k: None)
+    _reload_config_env(cfg_mod, str(f))
+
+    calls = []
+    monkeypatch.setattr(cfg_mod.log, "warning",
+                        lambda *a, **k: calls.append((a, k)))
+
+    assert cfg_mod.get("GIST_ID") == "public_gist"
+    assert calls == []                           # sır değil → uyarı yok
+
+
+# ── _keychain_get sözleşmesi (subprocess.run monkeypatch) ─────────────────────
+class _FakeProc:
+    def __init__(self, returncode, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_keychain_get_success_strips(monkeypatch):
+    # returncode=0 + stdout="  tok  " → strip'lenmiş "tok" döner.
+    import config as cfg_mod
+    monkeypatch.setattr(cfg_mod.subprocess, "run",
+                        lambda *a, **k: _FakeProc(0, "  tok  "))
+    assert cfg_mod._keychain_get("GITHUB_TOKEN") == "tok"
+
+
+def test_keychain_get_nonzero_returncode_returns_none(monkeypatch):
+    # returncode != 0 (anahtar yok) → None.
+    import config as cfg_mod
+    monkeypatch.setattr(cfg_mod.subprocess, "run",
+                        lambda *a, **k: _FakeProc(1, ""))
+    assert cfg_mod._keychain_get("GITHUB_TOKEN") is None
+
+
+def test_keychain_get_oserror_returns_none(monkeypatch):
+    # 'security' bulunamazsa (OSError) → None (çökme yok).
+    import config as cfg_mod
+
+    def boom(*a, **k):
+        raise OSError("security yok")
+
+    monkeypatch.setattr(cfg_mod.subprocess, "run", boom)
+    assert cfg_mod._keychain_get("GITHUB_TOKEN") is None
+
+
+def test_keychain_get_subprocess_error_returns_none(monkeypatch):
+    # subprocess.SubprocessError (ör. timeout) → None.
+    import config as cfg_mod
+
+    def boom(*a, **k):
+        raise cfg_mod.subprocess.SubprocessError("timeout")
+
+    monkeypatch.setattr(cfg_mod.subprocess, "run", boom)
+    assert cfg_mod._keychain_get("GITHUB_TOKEN") is None

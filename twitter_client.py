@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 
 import config
@@ -37,6 +38,7 @@ _DEFAULT_RSSHUB = "http://localhost:1200"
 _MAX_RETRIES = 2          # bir istekte 429 sonrası en fazla bu kadar tekrar
 _MAX_BACKOFF = 30         # Retry-After'ı bu saniyeyle sınırla (UI'yı kilitleme)
 _TIMEOUT = 10
+_MAX_WORKERS = 6          # keyword istekleri için eşzamanlı thread üst sınırı
 
 # X-özel arama operatörleri (keyword route yok sayar) — sorgudan sıyır.
 _X_OPERATOR_RE = re.compile(r"(?:^|\s)-?(?:lang|is|filter):\S+", re.IGNORECASE)
@@ -82,7 +84,6 @@ def _fetch_one(keyword):
     base = _rsshub_base()
     q = urllib.parse.quote(keyword)
     url = f"{base}/twitter/keyword/{q}"
-    last_err = "kaynak yok"
     for attempt in range(_MAX_RETRIES + 1):
         try:
             req = urllib.request.Request(
@@ -118,15 +119,19 @@ def _fetch_one(keyword):
         except Exception as e:
             log.warning("RSSHub isteği başarısız (%s): %s", keyword, e)
             return None, "ağ hatası"
-    return None, last_err
+    # Buraya yalnızca son denemede 429+continue ile döngü tükenirse düşülür;
+    # pratikte son iterasyonda 429 dalı return'e girer, yine de savunma amaçlı.
+    return None, "rate-limit"
 
 
 def _fetch_items(query):
     """Sorgudaki her sembol için RSSHub'ı çek; birleşik (items, err) döndür.
 
-    En az bir sembol başarılıysa kısmi sonuç döner (err None). Tüm semboller
-    düşerse (None, son_hata). Sıralama/tekilleştirme çağıran (fetch_recent/
-    fetch_ids) tarafından _parse_item sonrası yapılır.
+    Her keyword ayrı thread'de PARALEL çekilir (sıralı değil): K sembolde
+    toplam süre ~max(istek) seviyesinde kalır, K×gecikme'ye çıkmaz. En az bir
+    sembol başarılıysa kısmi sonuç döner (err None). Tüm semboller düşerse
+    (None, son_hata). Sıralama/tekilleştirme çağıran (fetch_recent/fetch_ids)
+    tarafından _parse_item sonrası yapılır.
     """
     keywords = _keyword_from_query(query)
     if not keywords:
@@ -134,8 +139,14 @@ def _fetch_items(query):
     all_items = []
     last_err = "kaynak yok"
     any_ok = False
-    for kw in keywords:
-        items, err = _fetch_one(kw)
+    # Eşzamanlılığı sembol sayısıyla sınırla (tek sembolde thread havuzu kurma).
+    workers = min(len(keywords), _MAX_WORKERS)
+    if workers <= 1:
+        results = [_fetch_one(kw) for kw in keywords]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_fetch_one, keywords))
+    for items, err in results:
         if err is None:
             any_ok = True
             all_items.extend(items)
@@ -163,7 +174,8 @@ def _parse_item(item):
     """RSS <item> → (tweet_dict, username, name).
 
     tweet_dict: {"id","text","created_at","author_id"}. author_id = username
-    (Nitter'da ayrı numeric id yok). created_at ISO8601 (tw_ago bunu parse eder).
+    (RSSHub dc:creator handle'ıdır; ayrı numeric id yok). created_at ISO8601
+    (tw_ago bunu parse eder; zaman dilimsiz gelebilir).
     """
     link = _text(item, "link") or _text(item, "guid")
     m = _STATUS_ID_RE.search(link)

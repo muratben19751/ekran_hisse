@@ -177,3 +177,17 @@ hâlâ "Nitter" diyordu → RSSHub'a çekildi (kod 2026-08-13'te geçmişti).
 
 **Lint (sonrası):** broken_links/orphans/missing_summary/missing_frontmatter/stale/stubs = 0.
 Backlinks 9 sayfada tazelendi, index yeniden üretildi.
+
+## 2026-08-14 — DeepR 4. tur review + tüm bulguların düzeltilmesi
+- **Review:** DeepR skill (Workflow, 92 ajan, 11 boyut, adversarial doğrulama) → 28 doğrulanmış bulgu. Kullanıcı "tüm bulguları yap" dedi.
+- **Kaynak:** `sources/08_deepr_review_round4_2026-08-14.md` (immutable snapshot).
+- **Giderildi (G56–G69, 14 kalem):** kritik veri-kaybı yolları öncelikli.
+  - G56 (KRİTİK): stocks.json bozuk-dosyada sessiz `[]` → portföy kaybı. `.corrupt.<n>` yedeği + save-bloklama bayrağı + açılış uyarısı.
+  - G57 (YÜKSEK): not silme onay diyaloğu (`QMessageBox`, geri alınamaz uyarısı).
+  - G58 (YÜKSEK): .app bundle US eşlemesi bozuktu (`AAPL→BIST:AAPL`); bundle senkronlandı (`→NASDAQ:AAPL`), `install.sh`'a `cmp -s` senkron kapısı.
+  - G59–G67: tw_ago naive-datetime crash, SEP-önekli sembol reddi (`is_valid_user_symbol`), negatif/sıfır adet-çarpan doğrulaması, Twitter paralel fetch (ThreadPool) + poll backoff, TV auth token invalidasyonu, sanitize_stocks inf/nan filtresi, ölü kod (fetch_tv_rsi/BEARER_TOKEN), docstring/dead-return temizliği.
+  - G69: test kapsamı +27 (auth token, config sır/Keychain, yeni test_paths.py, logic yeni fonksiyonlar); 2 totolojik test gerçek fonksiyonu sürecek şekilde düzeltildi.
+- **Doğrulama:** `pytest -q` → 279 passed (252→279); `ruff check .` → temiz.
+- **Teknik borç (kullanıcı kararı — DOKUNULMADI):** overlay.py God-module (2883 satır) ve `_rebuild_rows` O(n). Yüksek regresyon riskli refactor; `known_issues.md` "Orta/Düşük (açık)" altında resmileştirildi. storage.py ayrımı öneri olarak not edildi.
+- **Güncellenen Layer 2:** known_issues (4. tur bölümü + açık-madde listesi güncellendi).
+- Backlinks 9 sayfada tazelendi, index yeniden üretildi.

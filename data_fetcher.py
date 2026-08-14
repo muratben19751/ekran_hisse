@@ -76,6 +76,18 @@ def _get_tv_auth_token() -> str:
         return "unauthorized_user_token"
 
 
+def _invalidate_tv_auth_token() -> None:
+    """Pozitif token cache'ini temizle; bir sonraki çağrı yeniden çeker.
+
+    TV session/auth_token sunucu tarafında expire olursa cache eski (geçersiz)
+    token'ı süresizce döndürür; WS auth reddedilir ve fiyat/RSI sessizce boş
+    döner. Boş sonuç tespit eden fetch fonksiyonları bunu çağırıp bir kez yeniler.
+    """
+    with _tv_auth_token_lock:
+        _tv_auth_token_cache[0] = None
+        _tv_auth_neg_until[0] = 0.0
+
+
 def _rand_id(prefix: str) -> str:
     return prefix + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
 
@@ -96,7 +108,23 @@ def fetch_tv_prices(symbols: list) -> dict:
     sembolüne (ör. 'KO') geri-eşlenir. Böylece aynı ticker'ın farklı borsalardaki
     versiyonları (BIST:KO vs NYSE:KO) çakışmaz; eski split(':')[-1] eşlemesi bunu
     ayırt edemiyordu.
+
+    Sonuç TAMAMEN boşsa (olası: expire olmuş auth token → WS reddi) token cache'i
+    bir kez invalide edilip yeniden denenir; ikinci denemede de boşsa boş döner.
     """
+    if not symbols:
+        return {}
+    out = _fetch_tv_prices_once(symbols)
+    if not out and TV_SESSION_ID and _tv_auth_token_cache[0]:
+        # Cache'lenmiş bir token vardı ama hiç sonuç gelmedi → token expire
+        # olmuş olabilir; invalide edip bir kez daha dene.
+        log.info("TV fiyat sonucu boş; auth token yenilenip yeniden deneniyor")
+        _invalidate_tv_auth_token()
+        out = _fetch_tv_prices_once(symbols)
+    return out
+
+
+def _fetch_tv_prices_once(symbols: list) -> dict:
     results = {}
     done_event = threading.Event()
     quote_session = _rand_id("qs_")
@@ -216,20 +244,27 @@ def _calc_rsi(closes: list, period: int = 14):
     return round(100 - 100 / (1 + rs), 1)
 
 
-def fetch_tv_rsi(symbol: str, intervals: list = None) -> dict:
-    """Tek sembol için RSI. (Geriye dönük uyumluluk — içeride bulk çağırır.)"""
-    if intervals is None:
-        intervals = [5, 15, 30, 60]
-    out = fetch_tv_rsi_bulk([symbol], intervals)
-    return out.get(symbol.upper(), {iv: None for iv in intervals})
-
-
 def fetch_tv_rsi_bulk(symbols: list, intervals: list = None) -> dict:
     """Tüm semboller için RSI'yı TEK WS bağlantısında toplu çeker.
 
     Her (sembol, interval) için ayrı bir chart series açar; hepsi aynı bağlantıda
     paralel resolve edilir. Döndürür: {SEMBOL_UPPER: {interval: rsi|None}}.
+
+    Tüm sonuçlar None ise (olası: expire auth token → WS reddi) token cache'i bir
+    kez invalide edilip yeniden denenir.
     """
+    if intervals is None:
+        intervals = [5, 15, 30, 60]
+    out = _fetch_tv_rsi_bulk_once(symbols, intervals)
+    all_none = all(v is None for d in out.values() for v in d.values()) if out else True
+    if all_none and symbols and TV_SESSION_ID and _tv_auth_token_cache[0]:
+        log.info("TV RSI sonucu boş; auth token yenilenip yeniden deneniyor")
+        _invalidate_tv_auth_token()
+        out = _fetch_tv_rsi_bulk_once(symbols, intervals)
+    return out
+
+
+def _fetch_tv_rsi_bulk_once(symbols: list, intervals: list = None) -> dict:
     if intervals is None:
         intervals = [5, 15, 30, 60]
     intervals = [iv for iv in intervals if iv in _TV_INTERVALS]

@@ -67,6 +67,70 @@ def test_rand_id_format():
     assert s[3:].isalnum() and s[3:].islower()
 
 
+# ── _get_tv_auth_token / _invalidate_tv_auth_token ────────────────────────────
+# Auth token cache mantığı: pozitif token süresizce cache'lenir, başarısız
+# sonuç kısa süre negatif cache'lenir. Testler arası sızıntı olmasın diye her
+# testin başında iki cache slot'unu sıfırla.
+def _reset_tv_auth():
+    df._tv_auth_token_cache[0] = None
+    df._tv_auth_neg_until[0] = 0.0
+
+
+def test_get_tv_auth_token_no_session_returns_unauthorized(monkeypatch):
+    # SESSION_ID boşken HTTP hiç yapılmaz; 'unauthorized_user_token' döner.
+    _reset_tv_auth()
+    monkeypatch.setattr(df, "TV_SESSION_ID", "")
+    assert df._get_tv_auth_token() == "unauthorized_user_token"
+
+
+def test_get_tv_auth_token_positive_cache_no_http(monkeypatch):
+    # Pozitif cache doluyken HTTP yapılmadan cache dönmeli. requests import'unu
+    # patlayacak sahte modülle enjekte et: cache HİT olursa hiç import edilmez.
+    _reset_tv_auth()
+    monkeypatch.setattr(df, "TV_SESSION_ID", "sess123")
+    df._tv_auth_token_cache[0] = "cached_tok"
+
+    import types
+    boom = types.ModuleType("requests")
+
+    def _explode(*a, **k):
+        raise AssertionError("cache doluyken HTTP yapılmamalı")
+
+    boom.Session = _explode
+    monkeypatch.setitem(sys.modules, "requests", boom)
+
+    assert df._get_tv_auth_token() == "cached_tok"
+
+
+def test_get_tv_auth_token_negative_cache_returns_unauthorized(monkeypatch):
+    # neg_until gelecekteyken (yakın zamanda başarısız) HTTP yapılmadan
+    # 'unauthorized_user_token' döner.
+    _reset_tv_auth()
+    monkeypatch.setattr(df, "TV_SESSION_ID", "sess123")
+    df._tv_auth_neg_until[0] = df.time.monotonic() + 1000.0
+
+    import types
+    boom = types.ModuleType("requests")
+
+    def _explode(*a, **k):
+        raise AssertionError("negatif cache aktifken HTTP yapılmamalı")
+
+    boom.Session = _explode
+    monkeypatch.setitem(sys.modules, "requests", boom)
+
+    assert df._get_tv_auth_token() == "unauthorized_user_token"
+
+
+def test_invalidate_tv_auth_token_resets_caches():
+    # _invalidate_tv_auth_token hem pozitif token'ı hem neg_until'ı sıfırlar.
+    _reset_tv_auth()
+    df._tv_auth_token_cache[0] = "tok"
+    df._tv_auth_neg_until[0] = df.time.monotonic() + 500.0
+    df._invalidate_tv_auth_token()
+    assert df._tv_auth_token_cache[0] is None
+    assert df._tv_auth_neg_until[0] == 0.0
+
+
 # ── _calc_rsi ────────────────────────────────────────────────────────────────
 def test_calc_rsi_insufficient_data():
     # period=14 için en az 15 kapanış gerekir; az veriyle None dönmeli
@@ -104,14 +168,16 @@ def test_calc_rsi_returns_rounded_one_decimal():
 
 
 # ── price=0.0 fix — or operatörü yerine is not None kullanılmalı ─────────────
-def test_price_zero_not_treated_as_missing():
-    # fetch_tv_prices içindeki mantığı simüle et: lp=0.0 → None değil, geçerli
-    lp = 0.0
-    last = 5.0
-    # Eski kod: price = lp or last  →  5.0 (yanlış)
-    # Yeni kod: price = lp if lp is not None else last  →  0.0 (doğru)
-    price = lp if lp is not None else last
-    assert price == 0.0
+def test_price_zero_not_treated_as_missing(monkeypatch):
+    # Gerçek fetch akışını sür: lp=0.0 içeren bir qsd paketi → fiyat 0.0 KORUNUR
+    # (None'a düşmez). Eski 'price = lp or last' mantığı 0.0'ı eksik sanırdı.
+    # Harness on_open + on_message'ı gerçek data_fetcher koduyla çalıştırır.
+    res = _drive_fetch_tv_prices(
+        monkeypatch, ["THYAO"], [("BIST:THYAO", 0.0)],
+    )
+    assert "THYAO" in res
+    assert res["THYAO"][0] == 0.0
+    assert res["THYAO"][0] is not None
 
 
 # ── _TV_INTERVALS guard ───────────────────────────────────────────────────────
@@ -456,25 +522,65 @@ def test_fetch_all_specials_prev_zero_no_div_by_zero(monkeypatch):
     assert out["XAUUSD"]["price"] is None
 
 
-# ── TV timescale_update parse sözleşmesi (kayıtlı payload) ────────────────────
-# Canlı WS test edilemez ama parse mantığının close çıkarımı (b["v"][4]) ve
-# _calc_rsi zinciri kayıtlı bir örnek payload'la doğrulanabilir. TV mesaj formatı
-# değişirse (v dizisi düzeni) bu test kırılır → sessiz regresyon görünür olur.
-def test_tv_timescale_bars_close_extraction_contract():
-    # TV bar formatı: {"v": [time, open, high, low, close, volume]}
+# ── TV timescale_update parse sözleşmesi (gerçek fetch akışı) ─────────────────
+# Canlı WS test edilemez ama parse mantığı (close çıkarımı b["v"][4] + _calc_rsi
+# zinciri) GERÇEK _fetch_tv_rsi_bulk_once on_message'ını sürerek doğrulanabilir:
+# WebSocketApp sahtelenir, verilen bar'lar bir timescale_update paketiyle
+# on_message'a beslenir. TV mesaj formatı değişirse test kırılır.
+def _drive_fetch_tv_rsi(monkeypatch, symbol, interval, bars):
+    """WebSocketApp'i sahtele; _fetch_tv_rsi_bulk_once'ın gerçek on_open/
+    on_message'ını sürerek verilen bar'lardan hesaplanan RSI'yı döndür.
+
+    bars: [{"v": [time, open, high, low, close, volume]}] — TV bar formatı.
+    Döndürür: sembol/interval için hesaplanan RSI değeri (veya None).
+    """
+    import data_fetcher as _df
+
+    slot = "sym0"          # tek sembol → resolve slot'u
+    sid = f"{slot}_{interval}"
+
+    class _FakeWS:
+        def __init__(self, url, header=None, on_open=None, on_message=None,
+                     on_error=None, on_close=None):
+            self._on_open = on_open
+            self._on_message = on_message
+
+        def run_forever(self, **kw):
+            self._on_open(self)          # resolve_symbol + create_series (yutulur)
+            # Gerçek TV timescale_update paketi biçimi: p[1] = {sid: {"s": bars}}
+            pkt = {"m": "timescale_update", "p": ["cs", {sid: {"s": bars}}]}
+            body = _df.json.dumps(pkt)
+            self._on_message(self, f"~m~{len(body)}~m~{body}")
+            # Seriyi tamamla ki done event set olsun ve fetch beklemesin.
+            done_pkt = {"m": "series_completed", "p": ["cs", sid, "streaming"]}
+            db = _df.json.dumps(done_pkt)
+            self._on_message(self, f"~m~{len(db)}~m~{db}")
+
+        def send(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(_df.websocket, "WebSocketApp", _FakeWS)
+    monkeypatch.setattr(_df, "_get_tv_auth_token", lambda: "tok")
+    out = _df.fetch_tv_rsi_bulk([symbol], intervals=[interval])
+    return out[symbol.upper()][interval]
+
+
+def test_tv_timescale_bars_close_extraction_contract(monkeypatch):
+    # 16 artan kapanış → gerçek on_message close'ları çıkarır, _calc_rsi = 100.0.
+    # (yalnızca artış → avg_loss=0 → RSI 100)
     bars = [{"v": [1700000000 + i, 10.0, 11.0, 9.0, 10.0 + i, 100]}
             for i in range(16)]
-    # Parser'ın yaptığı çıkarım (data_fetcher.py on_message içindeki satır):
-    closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
-    assert closes == [10.0 + i for i in range(16)]
-    # Bu close serisi _calc_rsi'ye geçince geçerli (NaN olmayan) RSI üretmeli
-    rsi = df._calc_rsi(closes)
-    assert rsi == 100.0   # yalnızca artış
+    rsi = _drive_fetch_tv_rsi(monkeypatch, "THYAO", 15, bars)
+    assert rsi == 100.0
 
 
-def test_tv_timescale_short_v_array_skipped():
-    # Eksik/bozuk 'v' dizisi (< 5 eleman) close çıkarımından atlanmalı (KeyError/
-    # IndexError yerine sessiz atla) — parser'ın 'len(v) >= 5' koruması.
+def test_tv_timescale_short_v_array_skipped(monkeypatch):
+    # Eksik/bozuk 'v' dizisi (< 5 eleman) close çıkarımından atlanmalı (parser'ın
+    # 'len(v) >= 5' koruması). Geriye tek geçerli close kalır → period+1 altında
+    # → _calc_rsi None döner. Kısa dizinin IndexError vermeden atlandığını kanıtlar.
     bars = [{"v": [1, 2, 3]}, {"v": [10, 11, 12, 13, 42.0, 99]}]
-    closes = [b["v"][4] for b in bars if len(b.get("v", [])) >= 5]
-    assert closes == [42.0]
+    rsi = _drive_fetch_tv_rsi(monkeypatch, "THYAO", 15, bars)
+    assert rsi is None

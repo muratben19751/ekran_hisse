@@ -3,7 +3,6 @@
 import json
 import math
 import os
-import re
 import subprocess
 import tempfile
 import threading
@@ -40,6 +39,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -59,6 +59,7 @@ from logic import (
     compute_pnl,
     compute_unread,
     group_stocks,
+    is_valid_user_symbol,
     make_sep_symbol,
     next_separator_counter,
     parse_price,
@@ -293,16 +294,54 @@ def _save_json(path, data):
                 pass
 
 
+# stocks.json okunamadığında (bozuk/OSError) True olur: bu oturumda save_stocks
+# BLOKLANIR. Aksi halde açılışta [] yüklenip kullanıcının ilk işlemi tüm portföyü
+# ezerdi (geri dönülemez veri kaybı). Bozuk dosya ayrıca .corrupt olarak yedeklenir.
+_stocks_load_failed = [False]
+
+
+def stocks_load_failed():
+    """Son load_stocks çağrısı bozuk/okunamaz dosya nedeniyle başarısız mı?"""
+    return _stocks_load_failed[0]
+
+
+def _backup_corrupt(path):
+    """Bozuk veri dosyasını .corrupt.<n> olarak yeniden adlandır (üstüne yazmadan).
+
+    Aynı adlı yedek varsa artan sayaçla yeni ad bulur; böylece art arda açılışlarda
+    önceki bozuk yedekler de korunur. Yeniden adlandırma başarısızsa sessiz geç
+    (dosya yine yerinde kalır, save zaten bloklanır)."""
+    for i in range(1, 1000):
+        cand = f"{path}.corrupt.{i}"
+        if not os.path.exists(cand):
+            try:
+                os.replace(path, cand)
+                log.warning("Bozuk veri dosyası yedeklendi: %s → %s", path, cand)
+            except OSError as e:
+                log.warning("Bozuk dosya yedeklenemedi (%s): %s", path, e)
+            return
+
+
 def load_stocks():
     _migrate_legacy(STOCKS_FILE, _LEGACY_STOCKS)
+    _stocks_load_failed[0] = False
     if not os.path.exists(STOCKS_FILE):
         return []
     try:
         with open(STOCKS_FILE) as f:
             data = json.load(f)
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        # Dosya VAR ama okunamıyor/bozuk: [] dönüp save'e izin verirsek ilk
+        # kullanıcı işlemi gerçek portföyü ezer. Bunun yerine bozuk dosyayı
+        # yedekle ve save'i bu oturum boyunca blokla (veri asla silinmemeli).
+        log.error("stocks.json okunamadı/bozuk (%s): %s — save bloklanıyor", STOCKS_FILE, e)
+        _stocks_load_failed[0] = True
+        _backup_corrupt(STOCKS_FILE)
         return []
     if not isinstance(data, list):
+        log.error("stocks.json beklenmeyen biçim (list değil) — save bloklanıyor")
+        _stocks_load_failed[0] = True
+        _backup_corrupt(STOCKS_FILE)
         return []
     if data and isinstance(data[0], str):
         return [{"symbol": s, "entry": None, "exit": None} for s in data]
@@ -312,6 +351,11 @@ def load_stocks():
 
 
 def save_stocks(stocks):
+    if _stocks_load_failed[0]:
+        # Açılışta veri okunamadı → belleğimiz gerçek portföyü temsil etmiyor.
+        # Üstüne yazmak kalıcı kayıp olurdu; bu oturumda kayıt devre dışı.
+        log.warning("save_stocks atlandı: stocks.json bu oturumda okunamamıştı")
+        return
     _save_json(STOCKS_FILE, stocks)
 
 
@@ -544,7 +588,7 @@ class StockPickerSheet(_SheetDialog):
         # bir aday satır olarak en üste ekle ki Enter'la neyin ekleneceği belli
         # olsun (boş liste 'eklenemez' izlenimi vermesin).
         if (q and q not in items and q not in self._existing
-                and re.fullmatch(r"[A-Z0-9.\-]{1,20}", q)):
+                and is_valid_user_symbol(q)):
             items.insert(0, q)
         self.lst.clear()
         self.lst.addItems(items)
@@ -651,14 +695,20 @@ class TargetSheet(_SheetDialog):
     # ise _INVALID döner ve _save accept'i engeller (sessizce None kaydetmez).
     _INVALID = object()
 
-    def _num(self, text):
+    def _num(self, text, positive=False):
         text = text.strip()
         if not text:
             return None
         try:
-            return _parse_price(text)
+            v = _parse_price(text)
         except ValueError:
             return self._INVALID
+        # Adet/çarpan negatif ya da sıfır olamaz: aksi halde compute_pnl tutarı
+        # sessizce gizler (qty>0 şartı) ve kullanıcı neden Kâr/Zarar görmediğini
+        # anlamaz. Geçersiz say → kırmızı işaretlenip accept engellensin.
+        if positive and v <= 0:
+            return self._INVALID
+        return v
 
     def _mark_invalid(self, inp, bad):
         # Geçersiz alanı kırmızı kenarlıkla işaretle; kullanıcı düzeltince temizlenir.
@@ -672,8 +722,8 @@ class TargetSheet(_SheetDialog):
     def _save(self):
         entry = self._num(self.inp_entry.text())
         exit_ = self._num(self.inp_exit.text())
-        qty   = self._num(self.inp_qty.text())
-        mult  = self._num(self.inp_mult.text())
+        qty   = self._num(self.inp_qty.text(), positive=True)
+        mult  = self._num(self.inp_mult.text(), positive=True)
         bad_entry = entry is self._INVALID
         bad_exit = exit_ is self._INVALID
         bad_qty = qty is self._INVALID
@@ -1298,6 +1348,11 @@ class OverlayWindow(QWidget):
         self._twitter_poll_timer = QTimer(self)
         self._twitter_poll_timer.timeout.connect(self._twitter_poll)
         self._twitter_poll_timer.start(60_000)
+        # Ardışık poll hatasında aralık exponential büyür (RSSHub kapalıyken her
+        # 60sn'de boşa istek yapılmasın); başarıda tabana sıfırlanır.
+        self._tw_poll_base_ms = 60_000
+        self._tw_poll_max_ms = 15 * 60_000   # üst sınır: 15 dk
+        self._tw_poll_fail_streak = 0
         self.tw_poll_result.connect(self._twitter_poll_apply)
         self.tw_poll_error.connect(self._twitter_poll_error)
         self.tw_load_result.connect(self._twitter_load_apply)
@@ -1307,6 +1362,25 @@ class OverlayWindow(QWidget):
         self._rsi_timer.timeout.connect(self._rsi_refresh)
         self._rsi_timer.start(300_000)  # 5 dakikada bir
         QTimer.singleShot(3000, self._rsi_refresh)  # ilk yüklemede 3sn sonra başlat
+
+        # stocks.json açılışta okunamadıysa (bozuk/OSError) save bloklandı;
+        # kullanıcıyı bir kez uyar ki değişikliklerinin neden kaydedilmediğini
+        # bilsin (bozuk dosya .corrupt olarak yedeklendi, veri kaybı önlendi).
+        if stocks_load_failed():
+            QTimer.singleShot(800, self._warn_stocks_load_failed)
+
+    def _warn_stocks_load_failed(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Veri okunamadı")
+        box.setIcon(QMessageBox.Critical)
+        box.setText(
+            "Hisse listesi (stocks.json) okunamadı veya bozuk.\n\n"
+            "Verilerinizi korumak için bu oturumda kayıt DEVRE DIŞI bırakıldı; "
+            "yaptığınız değişiklikler diske yazılmayacak. Bozuk dosya '.corrupt' "
+            "uzantısıyla yedeklendi.\n\nUygulamayı kapatıp dosyayı düzeltebilir "
+            "ya da yedekten geri yükleyebilirsiniz."
+        )
+        box.exec()
 
     # ── UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -2323,15 +2397,26 @@ class OverlayWindow(QWidget):
         )
 
     def _twitter_poll_error(self, err):
-        """Ana thread — poll hatasını kullanıcıya göster (sessiz yutma yok)."""
-        # Sekme açıkken görünür durum çubuğuna yaz; kapalıyken sadece logla
-        # (rozet zaten güncellenmedi). Backoff yok ama en azından görünür.
+        """Ana thread — poll hatasını kullanıcıya göster + exponential backoff."""
         log.info("twitter poll hatası: %s", err)
+        # Ardışık hatada poll aralığını 2× büyüt (üst sınıra kadar): RSSHub
+        # kapalıyken/rate-limit'te her 60sn'de boşa istek atmayı önle.
+        self._tw_poll_fail_streak += 1
+        interval = min(self._tw_poll_max_ms,
+                       self._tw_poll_base_ms * (2 ** (self._tw_poll_fail_streak - 1)))
+        if self._twitter_poll_timer.interval() != interval:
+            self._twitter_poll_timer.setInterval(interval)
+            log.info("twitter poll aralığı %ds'ye yükseltildi (ardışık hata: %d)",
+                     interval // 1000, self._tw_poll_fail_streak)
         if self._mode == 3 and hasattr(self, "lbl_tw_time"):
             self.lbl_tw_time.setText(f"poll hatası: {err}")
 
     def _twitter_poll_apply(self, incoming):
         """Ana thread — poll sonucunu state'e uygula (thread-safe)."""
+        # Başarılı poll: backoff'u tabana sıfırla.
+        if self._tw_poll_fail_streak:
+            self._tw_poll_fail_streak = 0
+            self._twitter_poll_timer.setInterval(self._tw_poll_base_ms)
         new_ids, self._tw_seen = compute_unread(
             incoming, self._tw_seen, active=(self._mode == 3))
         self._prune_tw_seen(incoming)
@@ -2571,7 +2656,7 @@ class OverlayWindow(QWidget):
         already = any(s["symbol"].upper() == q for s in self.stocks)
         # Buton, henüz eklenmemiş ve geçerli biçimdeki her sembolde görünür
         # (sembol evreni kısıtı kaldırıldı; is_known artık kapı değil).
-        valid_form = bool(re.fullmatch(r"[A-Z0-9.\-]{1,20}", q))
+        valid_form = is_valid_user_symbol(q)
         self.btn_add_inline.setVisible(len(q) >= 3 and not already and valid_form)
         # Gecikmeli: liste yeniden kurma (200ms yazma durunca)
         self._search_timer.start(200)
@@ -2586,9 +2671,9 @@ class OverlayWindow(QWidget):
             return
         # Sembol evreni kısıtı kaldırıldı: listede olmasa da kullanıcının yazdığı
         # sembol eklenir (data varsayılan eşlemeyle çekilir, gelmezse '—').
-        # Yalnızca kaba bir biçim kontrolü: harf/rakam/nokta/tire (BIST ve özel
-        # ticker'lar bunlarla ifade edilir); boşluklu/anlamsız girdi eklenmesin.
-        if not re.fullmatch(r"[A-Z0-9.\-]{1,20}", sym):
+        # Yalnızca kaba bir biçim kontrolü + bölüm ayracı önekinin reddi
+        # (is_valid_user_symbol): '---' gibi girdiler görünmez ayraca dönüşmesin.
+        if not is_valid_user_symbol(sym):
             self.lbl_stock_status.setText(f"Geçersiz sembol: {sym}")
             return
         if not any(s["symbol"] == sym for s in self.stocks):
@@ -2876,6 +2961,19 @@ class OverlayWindow(QWidget):
 
     def _delete_note(self):
         if self._current_note is None:
+            return
+        # Silme anında ve geri alınamaz şekilde Gist'e yazılır (last-write-wins,
+        # undo yok). Kazara tek tıkla veri kaybını önlemek için önce onay iste.
+        title = self._notes[self._current_note].get("title", "") or "(başlıksız)"
+        box = QMessageBox(self)
+        box.setWindowTitle("Notu sil")
+        box.setText(f"“{title}” notu kalıcı olarak silinecek.\nBu işlem geri alınamaz.")
+        box.setIcon(QMessageBox.Warning)
+        yes = box.addButton("Sil", QMessageBox.DestructiveRole)
+        box.addButton("Vazgeç", QMessageBox.RejectRole)
+        box.setDefaultButton(box.buttons()[-1])
+        box.exec()
+        if box.clickedButton() is not yes:
             return
         self._notes.pop(self._current_note)
         self._current_note = None

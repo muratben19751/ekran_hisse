@@ -403,9 +403,8 @@ def test_hit_zone_regions(win):
 
 # ── Resize sürüklemesi: sağ+alt kenar sabit, genişlik büyür, save_geom çağrılır ─
 def test_resize_drag_keeps_anchor_and_saves(win, monkeypatch):
-    from PySide6.QtCore import QPoint
+    from PySide6.QtCore import QEvent, QPoint, QPointF
     from PySide6.QtGui import QMouseEvent
-    from PySide6.QtCore import QEvent, QPointF
 
     win._toggle(1)   # panel açık (mode 1)
     win._panel_w = overlay.PANEL_W

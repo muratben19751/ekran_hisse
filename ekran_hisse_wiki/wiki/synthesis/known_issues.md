@@ -1,7 +1,7 @@
 ---
 title: Bilinen Sorunlar
 type: synthesis
-summary: EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar + teknik borç; ayrıca 2026-08-13 tweet alarmı X API 402'den Nitter RSS köprüsüne taşındı (bearer'sız), kalan engel public Nitter instance'larının kapalı olması.
+summary: EkranHisse'de dört DeepR review turuyla (2026-08-06/11/12/14) tespit edilen bug'lar + teknik borç. 4. tur (2026-08-14) 28 doğrulanmış bulgunun tümü düzeltildi (mimari refactor hariç); kritik veri-kaybı yolları (stocks.json bozuk-dosya + not silme onayı) kapatıldı, .app bundle US eşlemesi senkronlandı.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
@@ -9,9 +9,10 @@ sources:
   - sources/04_oturum_2026-08-13.md
   - sources/05_nitter_rss_2026-08-13.md
   - sources/06_reorder_pnl_2026-08-13.md
+  - sources/08_deepr_review_round4_2026-08-14.md
 related:
   - wiki/synthesis/architecture_overview.md
-last_updated: 2026-08-13
+last_updated: 2026-08-14
 ---
 
 # Bilinen Sorunlar
@@ -122,9 +123,38 @@ last_updated: 2026-08-13
 
 ---
 
-## 🟡 Tweet alarmı: X API 402 → Nitter RSS köprüsü (2026-08-13)
+---
 
-**Özgün belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread`) hiç dolmuyor, akış
+## ✅ Giderilen (2026-08-14, 4. tur — DeepR 92 ajan, adversarial doğrulandı)
+
+28 doğrulanmış bulgunun tümü düzeltildi (mimari refactor hariç). Detay:
+`sources/08_deepr_review_round4_2026-08-14.md`.
+
+| # | Sorun | Düzeltme |
+|---|-------|----------|
+| G56 | **stocks.json bozuk/OSError'da sessiz `[]` → ilk kayıtta portföy kaybı** (KRİTİK; 3 boyut bağımsız buldu) | `_stocks_load_failed` bayrağı; bozuk dosya `.corrupt.<n>` yedeklenir; `save_stocks` o oturum bloklanır; açılışta `QMessageBox` kritik uyarı |
+| G57 | **Not silme anında + onaysız Gist'e** (last-write-wins, undo yok) | `_delete_note`'a `QMessageBox` onay diyaloğu (başlık gösterir, DestructiveRole) |
+| G58 | **.app bundle US hisse fiyat/RSI'ını sessizce bozuyor** — bundle symbols eski (US yok, `AAPL→BIST:AAPL`) | bundle'a tüm kaynak senkronlandı (`AAPL→NASDAQ:AAPL` doğrulandı); `install.sh`'a `cmp -s` senkron doğrulaması (ayrışmada kurulum durur) |
+| G59 | `tw_ago` naive datetime → TypeError, tüm tweet listesi kırılır | naive `t` → `timezone.utc` bağlanır |
+| G60 | `---` önekli sembol görünmez bölüm ayracına dönüşüyor (fiyat satırı kaybolur) | yeni `logic.is_valid_user_symbol` (SEP öneki + salt-noktalama reddi); 3 çağrı yeri |
+| G61 | Negatif/sıfır adet/çarpan sessizce yutuluyor (compute_pnl tutarı gizler, geri bildirim yok) | `TargetSheet._num(positive=True)` → ≤0 `_INVALID` + kırmızı işaret |
+| G62 | Twitter keyword istekleri sıralı — N sembolde N× gecikme | `_fetch_items` `ThreadPoolExecutor` ile paralel (max 6), sıra korunur |
+| G63 | Twitter poll hata sonrası backoff yok (RSSHub kapalıyken her 60sn boşa istek) | ardışık hatada exponential backoff (60sn→15dk cap); başarıda tabana sıfırlanır |
+| G64 | **TV auth token pozitif cache süresiz** — token expire olunca fiyat/RSI sessizce boş | `_invalidate_tv_auth_token`; fetch tamamen boş sonuçta bir kez invalide + retry |
+| G65 | `sanitize_stocks` inf/nan geçiriyor → 'inf'/'nan' gösterimi | `math.isfinite` filtresi; `compute_pnl` inf entry/price'ta (None,None) |
+| G66 | Ölü kod: `fetch_tv_rsi` (kullanılmıyor), `TWITTER_BEARER_TOKEN` (X API v2 kaldırıldı) | `fetch_tv_rsi` bulk retry sarmalayıcısına dönüştü; BEARER_TOKEN config'ten kaldırıldı |
+| G67 | `_parse_item` docstring Nitter atfı (artık RSSHub); `_fetch_one` ulaşılamayan `return` | docstring RSSHub'a güncellendi; ölü `last_err` sadeleştirildi |
+| G68 | `test_overlay_ui.py` parçalı import (I001) | `ruff --fix` |
+| G69 | Test kapsamı boşlukları + 2 totolojik test | +27 test: `_get_tv_auth_token`/invalidate, config sır uyarısı + Keychain dalları, yeni `test_paths.py`, `is_valid_user_symbol`/sanitize/compute_pnl/tw_ago; totolojik testler gerçek fonksiyonu sürecek şekilde düzeltildi |
+
+**Doğrulama:** `pytest -q` → **279 passed** (252→279, +27); `ruff check .` → temiz.
+
+**Kapsam DIŞI (kullanıcı kararı — teknik borç, aşağıya taşındı):** overlay.py
+God-module ve `_rebuild_rows` O(n) yüksek regresyon riskli refactor; ertelendi.
+
+---
+
+## 🟡 Tweet alarmı: X API 402 → Nitter RSS köprüsü (2026-08-13)**Özgün belirti:** 𝕏 sekmesindeki alarm rozeti (`_tw_unread`) hiç dolmuyor, akış
 boş. Alarm = görsel rozet + yeni tweet vurgusu (`_tw_hl`); sesli/sistem bildirimi
 zaten yok.
 
@@ -161,14 +191,17 @@ status'a yazar; kapalıyken sessizce loglar (görünürlük iyileştirmesi yapı
 
 ## Orta / Düşük (açık)
 
-- **`_rebuild_rows`** her mutasyonda tam rebuild — 50 hissede her etkileşimde 50 widget yeniden oluşturuluyor.
+- **Teknik borç — `overlay.py` God-module (2883 satır):** kalıcılık (load/save_stocks, _save_json, geom/scale G/Ç) + UI + thread/timer orkestrasyonu + macOS köprüsü aynı dosyada. `test_stocks_io` Qt'siz çalışamıyor. **4. turda kullanıcı "dokunma, teknik borç kaydet" dedi** (yüksek regresyon riski). Öneri: kalıcılık katmanı ayrı `storage.py`'ye çıkarılabilir.
+- **Teknik borç — `_rebuild_rows` O(n):** her yapısal mutasyonda (ekle/sil/taşı/yeniden-adlandır) tüm widget'lar deleteLater + sıfırdan kurulur. Düşük şiddet (veri kaybı yok, küçük listede önemsiz); arama filtresi zaten `setVisible` ile kaçınıyor. Ertelendi (Qt yaşam-döngüsü tuzakları riskli).
 - **`TargetBar`** sınıfı hiç örneklenmiyor — ölü kod (doğrula/kaldır).
-- **Twitter sembol sayısı** limitsiz; ~40+ sembolde 512 byte Twitter API limitini aşabilir.
-- ~~`TWITTER_QUERY` env okunmuyor~~ → **çözüldü/doğrulandı (2026-08-13):** `overlay._twitter_query()` `config.TWITTER_QUERY` doluysa aynen kullanır, boşsa sembollerden üretir.
-- **TV auth token** oturum süresi dolunca yenilenmiyor (negatif cache eklendi ama pozitif TTL/refresh yok).
+- **Twitter sembol sayısı** limitsiz; ~40+ sembolde RSSHub keyword sorgusu şişebilir (artık paralel çekiliyor ama sembol başına ayrı istek).
 - **Not editörü** karakter limiti yok; GitHub Gist 10 MB sınırı.
-- **Bölüm adında `:` karakteri** sembol ayrıştırmasını bozabiliyor (doğrula).
-- **Çok cihaz not senkronu** last-write-wins — eşzamanlı düzenlemede kayıp (belgeli, çözülmedi).
+- **Çok cihaz not senkronu** last-write-wins — eşzamanlı düzenlemede kayıp (belgeli, çözülmedi). Not silme artık onay ister (G57) ama çok-cihaz merge yok.
+
+### ✅ 4. turda çözülenler (önceki açık maddelerden)
+- ~~`_rebuild_rows` tam rebuild~~ → teknik borç olarak resmileştirildi (yukarı).
+- ~~TV auth token oturum süresi dolunca yenilenmiyor~~ → **çözüldü (G64):** boş sonuçta invalide+retry.
+- ~~Bölüm adında `:` / SEP karakteri ayrıştırmayı bozuyor~~ → **çözüldü (G60):** `is_valid_user_symbol` SEP önekini reddediyor.
 
 ---
 

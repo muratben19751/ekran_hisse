@@ -492,3 +492,46 @@ def test_sanitize_stocks_preserves_mult():
     ])
     assert out[0]["mult"] == 100
     assert out[1]["mult"] is None      # geçersiz → None
+
+
+# ── is_valid_user_symbol ──────────────────────────────────────────────────────
+@pytest.mark.parametrize("sym,expected", [
+    ("THYAO", True),
+    ("thyao", True),          # küçük harf de geçerli (upper'lanır)
+    ("XU100", True),
+    ("BRK.B", True),          # nokta içeren geçerli sembol
+    ("---", False),           # bölüm ayracı öneki reddedilir
+    ("---:Bankalar:0", False),  # bölüm başlığı reddedilir
+    ("...", False),           # salt noktalama → sembol değil
+    ("--", False),            # salt tire → sembol değil
+    ("", False),              # boş
+    ("   ", False),           # yalnız boşluk
+    ("A" * 21, False),        # 20 karakterden uzun
+])
+def test_is_valid_user_symbol(sym, expected):
+    assert logic.is_valid_user_symbol(sym) is expected
+
+
+# ── sanitize_stocks: inf/nan → None ───────────────────────────────────────────
+def test_sanitize_stocks_coerces_inf_nan_to_none():
+    # Elle düzenlenen JSON'da entry:1e400 → inf; sonlu olmayan değerler None olur.
+    out = logic.sanitize_stocks([
+        {"symbol": "X", "entry": float("inf"), "exit": float("nan"), "qty": float("-inf")},
+    ])
+    assert out == [{"symbol": "X", "entry": None, "exit": None, "qty": None}]
+
+
+# ── compute_pnl: inf entry/price → (None, None) ───────────────────────────────
+def test_compute_pnl_none_when_entry_or_price_infinite():
+    assert logic.compute_pnl(float("inf"), 100.0, 10) == (None, None)
+    assert logic.compute_pnl(100.0, float("inf"), 10) == (None, None)
+    assert logic.compute_pnl(100.0, float("nan"), 10) == (None, None)
+
+
+# ── tw_ago: naive datetime UTC kabul edilir ──────────────────────────────────
+def test_tw_ago_naive_datetime_treated_as_utc():
+    # TZ taşımayan iso (RFC822 '-0000' offseti naive üretebilir); naive t UTC
+    # kabul edilmeli — aksi halde aware ref ile çıkarma TypeError atardı.
+    naive_iso = "2026-08-11T11:59:30.000"   # 'Z' yok, offset yok → naive
+    assert logic.tw_ago(naive_iso, now=_NOW) == "şimdi"
+

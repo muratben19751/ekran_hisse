@@ -23,7 +23,7 @@ _CFG_FILE = paths.data_file("notes_config.env")
 
 _KEYCHAIN_SERVICE = "ekranhisse"
 # Bu anahtarlar sırdır; env'de düz metin görülürse uyarı verilir.
-_SECRET_KEYS = {"GITHUB_TOKEN", "TWITTER_BEARER_TOKEN", "TV_SESSION_ID"}
+_SECRET_KEYS = {"GITHUB_TOKEN", "TV_SESSION_ID"}
 
 
 def _load_env():
@@ -82,7 +82,6 @@ def get(key, default=""):
 
 GIST_ID              = get("GIST_ID")
 GITHUB_TOKEN         = get("GITHUB_TOKEN")
-TWITTER_BEARER_TOKEN = get("TWITTER_BEARER_TOKEN")
 TV_SESSION_ID        = get("TV_SESSION_ID")
 # Opsiyonel override: doluysa overlay._twitter_query() bunu aynen kullanır,
 # boşsa logic.twitter_query() izlenen sembollerden üretir.

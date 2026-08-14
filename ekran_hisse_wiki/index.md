@@ -10,6 +10,7 @@ Bu sayfa `tools/wiki_tools.py index` tarafından her sayfanın frontmatter'ında
 - [[05_nitter_rss_2026-08-13|05 Nitter Rss 2026-08-13]]  (`sources/05_nitter_rss_2026-08-13.md`)
 - [[06_reorder_pnl_2026-08-13|06 Reorder Pnl 2026-08-13]]  (`sources/06_reorder_pnl_2026-08-13.md`)
 - [[07_oturum_2026-08-14|07 Oturum 2026-08-14]]  (`sources/07_oturum_2026-08-14.md`)
+- [[08_deepr_review_round4_2026-08-14|08 Deepr Review Round4 2026-08-14]]  (`sources/08_deepr_review_round4_2026-08-14.md`)
 
 ## Entities (somut bileşenler)
 - [[data_fetcher|DataFetcher]] — TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı ve RSI çeken, yfinance bulk-fetch (FX/altın/kripto) kullanan veri katmanı; auth token thread-safe cache, NaN/ZeroDivision, falsy-zero ve tam-sembol eşleme (borsa çakışması) koruması içerir.  (`wiki/entities/data_fetcher.md`)
@@ -22,4 +23,4 @@ Bu sayfa `tools/wiki_tools.py index` tarafından her sayfanın frontmatter'ında
 
 ## Synthesis (karşılaştırmalar & rehberler)
 - [[architecture_overview|Mimari Genel Bakış]] — EkranHisse'nin katmanlı mimarisi: Qt overlay, TV WebSocket veri katmanı, signal köprüsü, paths/symbols/twitter_client/applog modülleri, floating/monitör yönetimi ve Keychain-öncelikli sır yönetimi.  (`wiki/synthesis/architecture_overview.md`)
-- [[known_issues|Bilinen Sorunlar]] — EkranHisse'de üç DeepR review turuyla (2026-08-06/11/12) tespit edilen bug'lar + teknik borç; ayrıca 2026-08-13 tweet alarmı X API 402'den Nitter RSS köprüsüne taşındı (bearer'sız), kalan engel public Nitter instance'larının kapalı olması.  (`wiki/synthesis/known_issues.md`)
+- [[known_issues|Bilinen Sorunlar]] — EkranHisse'de dört DeepR review turuyla (2026-08-06/11/12/14) tespit edilen bug'lar + teknik borç. 4. tur (2026-08-14) 28 doğrulanmış bulgunun tümü düzeltildi (mimari refactor hariç); kritik veri-kaybı yolları (stocks.json bozuk-dosya + not silme onayı) kapatıldı, .app bundle US eşlemesi senkronlandı.  (`wiki/synthesis/known_issues.md`)

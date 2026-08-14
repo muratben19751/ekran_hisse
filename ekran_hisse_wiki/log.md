@@ -191,3 +191,14 @@ Backlinks 9 sayfada tazelendi, index yeniden üretildi.
 - **Teknik borç (kullanıcı kararı — DOKUNULMADI):** overlay.py God-module (2883 satır) ve `_rebuild_rows` O(n). Yüksek regresyon riskli refactor; `known_issues.md` "Orta/Düşük (açık)" altında resmileştirildi. storage.py ayrımı öneri olarak not edildi.
 - **Güncellenen Layer 2:** known_issues (4. tur bölümü + açık-madde listesi güncellendi).
 - Backlinks 9 sayfada tazelendi, index yeniden üretildi.
+
+## 2026-08-14 — Sparkline yeniden tasarımı + gerçek intraday bar serisi
+- **İstek:** (1) sparkline'ı çizgi + alan dolgusu tasarımına çevir (referans görsel); (2) "hangi timeframe?" → biriktirilen anlık fiyat snapshot'ı yerine GERÇEK intraday bar serisi.
+- **Kaynak:** `sources/09_sparkline_intraday_2026-08-14.md` (immutable snapshot).
+- **Kod (commit a8845de, 205c2c2):**
+  - Tasarım: pseudo Heikin-Ashi mum (`_ha_candles`/`drawRect`) → `QPainterPath` çizgi + `QLinearGradient` alan dolgusu + son-nokta dolu daire (antialiasing). Renk `pts[-1] >= pts[0]` yönüne göre.
+  - Veri: `data_fetcher.fetch_tv_history(symbols, interval=5, bars=24)` (TV 5dk × 24 = son ~2 saat), RSI `create_series` altyapısını paylaşır. `Sparkline.restore()` gerçek barlarla tohumlar (`_has_history`); `set_live()` canlı fiyatı son barın üzerine yazar (pencere kaymaz), geçmiş yoksa append fallback.
+  - Orkestrasyon: `hist_result` Signal + `_hist_refresh` worker + `_on_hist_result`; açılış + her 5dk + panele geçişte tazelenir; `_spark_history`'ye yazılır (rebuild-korumalı).
+- **Doğrulama:** `pytest -q` → 284 passed (279→284, +5 sparkline testi); `ruff check .` → temiz.
+- **Güncellenen Layer 2:** sparkline (baştan yazıldı: pseudo-HA → çizgi+alan+intraday), data_fetcher (fetch_tv_history eklendi, fetch_tv_rsi→fetch_tv_rsi_bulk düzeltildi, TV Auth G64 çözümüyle güncellendi), stock_row (summary: çizgi sparkline), architecture_overview (data-flow: set_live/restore + fetch_tv_history).
+- Backlinks 9 sayfada tazelendi, index yeniden üretildi.

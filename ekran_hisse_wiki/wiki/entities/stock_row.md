@@ -1,7 +1,7 @@
 ---
 title: StockRow
 type: entity
-summary: Tek bir hisseyi gösteren satır widget'ı; sembol + pseudo-HA sparkline + fiyat + yüzde-pill'i ana satırda, kâr/zarar (tutar & %) ve RSI alttaki meta satırında; sağ-tık menüsünden hedef/adet/çarpan, taşıma ve kaldırma.
+summary: Tek bir hisseyi gösteren satır widget'ı; sembol + çizgi sparkline (gerçek intraday) + fiyat + yüzde-pill'i ana satırda, kâr/zarar (tutar & %) ve RSI alttaki meta satırında; sağ-tık menüsünden hedef/adet/çarpan, taşıma ve kaldırma.
 sources:
   - sources/01_proje_ozet.md
   - sources/06_reorder_pnl_2026-08-13.md

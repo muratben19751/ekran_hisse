@@ -11,13 +11,14 @@ Bu sayfa `tools/wiki_tools.py index` tarafından her sayfanın frontmatter'ında
 - [[06_reorder_pnl_2026-08-13|06 Reorder Pnl 2026-08-13]]  (`sources/06_reorder_pnl_2026-08-13.md`)
 - [[07_oturum_2026-08-14|07 Oturum 2026-08-14]]  (`sources/07_oturum_2026-08-14.md`)
 - [[08_deepr_review_round4_2026-08-14|08 Deepr Review Round4 2026-08-14]]  (`sources/08_deepr_review_round4_2026-08-14.md`)
+- [[09_sparkline_intraday_2026-08-14|09 Sparkline Intraday 2026-08-14]]  (`sources/09_sparkline_intraday_2026-08-14.md`)
 
 ## Entities (somut bileşenler)
-- [[data_fetcher|DataFetcher]] — TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı ve RSI çeken, yfinance bulk-fetch (FX/altın/kripto) kullanan veri katmanı; auth token thread-safe cache, NaN/ZeroDivision, falsy-zero ve tam-sembol eşleme (borsa çakışması) koruması içerir.  (`wiki/entities/data_fetcher.md`)
+- [[data_fetcher|DataFetcher]] — TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı, RSI ve sparkline için intraday bar serisi çeken, yfinance bulk-fetch (FX/altın/kripto) kullanan veri katmanı; auth token thread-safe cache + boş-sonuçta invalidasyon, NaN/ZeroDivision, falsy-zero ve tam-sembol eşleme koruması içerir.  (`wiki/entities/data_fetcher.md`)
 - [[overlay_window|OverlayWindow]] — Ana pencere widget'ı; şeffaf macOS overlay olarak sağ-alta yaslı açılır, hisse/Twitter/not sekmelerini barındırır; floating, monitör geçişi, sürükleme, kenar/köşe boyutlandırma ve font ölçekleme destekler.  (`wiki/entities/overlay_window.md`)
 - [[paths|paths]] — EkranHisse'nin veri-dizini yol politikasının tek kaynağı — ~/.ekranhisse için DATA_DIR, ensure_data_dir() ve data_file(); OSError'da ~'a fallback.  (`wiki/entities/paths.md`)
-- [[sparkline|Sparkline (Pseudo Heikin-Ashi)]] — StockRow içinde fiyat geçmişini pseudo Heikin-Ashi mumlarıyla gösteren mini grafik widget'ı.  (`wiki/entities/sparkline.md`)
-- [[stock_row|StockRow]] — Tek bir hisseyi gösteren satır widget'ı; sembol + pseudo-HA sparkline + fiyat + yüzde-pill'i ana satırda, kâr/zarar (tutar & %) ve RSI alttaki meta satırında; sağ-tık menüsünden hedef/adet/çarpan, taşıma ve kaldırma.  (`wiki/entities/stock_row.md`)
+- [[sparkline|Sparkline (Çizgi + Alan Dolgusu)]] — StockRow içinde gün-içi fiyatı GERÇEK intraday bar serisiyle (TV 5dk × 24 = son ~2 saat) çizgi + degrade alan dolgusu olarak gösteren mini grafik; canlı fiyat son barı günceller, son nokta anlık fiyatı vurgular.  (`wiki/entities/sparkline.md`)
+- [[stock_row|StockRow]] — Tek bir hisseyi gösteren satır widget'ı; sembol + çizgi sparkline (gerçek intraday) + fiyat + yüzde-pill'i ana satırda, kâr/zarar (tutar & %) ve RSI alttaki meta satırında; sağ-tık menüsünden hedef/adet/çarpan, taşıma ve kaldırma.  (`wiki/entities/stock_row.md`)
 - [[symbols|symbols]] — Sembol evreninin tek kaynağı — symbols.json'dan BIST_SYMBOLS/SPECIALS/US_SYMBOLS/KNOWN; fiyat (yfinance) ve RSI (TradingView) ticker eşlemesi tek yerde. 2026-08-14'ten beri ABD hisseleri (NYSE/NASDAQ) desteklenir; çözümleme SPECIALS→BIST→US→fallback önceliğiyle.  (`wiki/entities/symbols.md`)
 - [[twitter_client|twitter_client]] — 𝕏/Twitter ağ katmanı — 2026-08-13'ten beri X API v2 (402 credits depleted) yerine Nitter search RSS köprüsü; fetch_recent/fetch_ids aynı (data, err) callback şeklini korur, çoklu instance fallback + 429 backoff. Bearer token gerektirmez.  (`wiki/entities/twitter_client.md`)
 

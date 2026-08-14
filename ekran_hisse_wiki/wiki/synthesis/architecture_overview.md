@@ -7,6 +7,7 @@ sources:
   - sources/02_deepr_review_2026-08-11.md
   - sources/03_deepr_review_round2_2026-08-12.md
   - sources/07_oturum_2026-08-14.md
+  - sources/09_sparkline_intraday_2026-08-14.md
 last_updated: 2026-08-14
 ---
 
@@ -28,11 +29,11 @@ last_updated: 2026-08-14
 
 ```
 TradingView WebSocket
-  └─→ fetch_tv_prices() / fetch_tv_rsi()
+  └─→ fetch_tv_prices() / fetch_tv_rsi_bulk() / fetch_tv_history()
         └─→ _AppSignals (thread-safe)
-              └─→ OverlayWindow.apply_data() / apply_rsi()
+              └─→ OverlayWindow.apply_data() / apply_rsi() / _on_hist_result()
                     └─→ StockRow.update_data() / update_rsi()
-                          └─→ Sparkline.push() → paintEvent()
+                          └─→ Sparkline.set_live() (canlı) / restore() (intraday bar) → paintEvent()
                           └─→ lbl_rsi (5m/15m/30m/60m etiketleri)
 ```
 

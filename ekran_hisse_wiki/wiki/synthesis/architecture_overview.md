@@ -8,6 +8,7 @@ sources:
   - sources/03_deepr_review_round2_2026-08-12.md
   - sources/07_oturum_2026-08-14.md
   - sources/09_sparkline_intraday_2026-08-14.md
+  - sources/10_dikey_resize_fix_2026-08-14.md
 last_updated: 2026-08-14
 ---
 
@@ -74,9 +75,13 @@ TradingView WebSocket
 - Tek monitörde buton gizli (`setVisible(len(screens) > 1)`)
 - `self._current_sc` instance değişkeni — animasyon closure ve NSEvent koordinat dönüşümü bunu kullanır
 
-### Sürükleme
+### Sürükleme + dikey boyutlandırma
 - Başlık satırı (`_head_row` widget'ı) `mousePressEvent/Move/Release` ile pencereyi serbestçe taşır
 - Taşıma sırasında `self._current_sc = self.screen().geometry()` güncellenir
+- **Üst kenar devri (2026-08-14):** başlık satırının ilk `RESIZE_MARGIN`(=8) px'i
+  dikey-resize bölgesidir; orada basınca taşıma yerine `_resize_edge="top"` +
+  `_perform_resize` (pencere üstten yukarı uzar, alt kenar sabit). Aksi halde
+  taşıma. Detay: [[overlay_window]].
 
 ### _COLLECTION_BEHAVIOR sabiti
 - `overlay.py` modül düzeyinde tek kez tanımlı: `_CB_ALL_SPACES | _CB_STATIONARY`

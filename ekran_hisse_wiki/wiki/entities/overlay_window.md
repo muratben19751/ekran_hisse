@@ -8,6 +8,7 @@ sources:
   - sources/04_oturum_2026-08-13.md
   - sources/06_reorder_pnl_2026-08-13.md
   - sources/07_oturum_2026-08-14.md
+  - sources/10_dikey_resize_fix_2026-08-14.md
 last_updated: 2026-08-14
 ---
 
@@ -32,16 +33,30 @@ Her sayfanın başlık satırında üç buton bulunur:
 Başlık satırı widget'ına `mousePressEvent/Move/Release` bağlı; pencere serbestçe taşınabilir.
 Taşıma sırasında `self._current_sc` güncellenir.
 
+**Fix (2026-08-14 — üst kenar devri):** Başlık satırı pencerenin en üstünü kapladığı
+için üst kenardaki dikey-resize şeridini gölgeliyordu; kullanıcı üstten uzatınca
+pencere taşınıyordu (bkz. Kenar/köşe boyutlandırma).
+
 ## Kenar/köşe boyutlandırma + kalıcılık (2026-08-13)
 Pencere sağ-alta yaslı frameless HUD olduğundan boyutlandırılabilir kenarlar
 **SOL** (genişlik), **ÜST** (yükseklik, yukarı büyür) ve **SOL-ÜST köşe**. Sağ
 kenardaki sekme şeridi ve alt kenardaki ekran-yaslaması sabit kalır.
 - OverlayWindow düzeyinde `mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent`
   + `_hit_zone(pos)` (yerel koordinat → `'left'`/`'top'`/`'topleft'`/`None`),
-  `RESIZE_MARGIN=6` px yakalama. İmleç: SizeHor/SizeVer/SizeFDiag.
+  `RESIZE_MARGIN=8` px yakalama. İmleç: SizeHor/SizeVer/SizeFDiag.
 - Sürüklerken sağ (`r0.right()`) ve alt (`r0.bottom()`) kenar sabit tutulur; sol/üst
   kenar hareket eder. Sınırlar: genişlik `PANEL_W_MIN=220`–`PANEL_W_MAX=900`,
   yükseklik `WIN_H_MIN=200`–ekran alanı (kırpma otomatik).
+- **Fix (2026-08-14 — dikey uzatma / başlık üst kenar):** Üst kenar `_head_row`
+  başlık widget'ının altında kaldığından `_hit_zone`'un `'top'` şeridi hiç
+  tetiklenmiyordu; başlık handler'ları pencereyi taşıyordu. Artık `_head_row`
+  handler'ları üst-kenar-farkındalıklı: `_on_top_edge(e)` (yerel `y <=
+  RESIZE_MARGIN`) doğruysa `press` taşıma yerine `_resize_edge = "top"` kurar,
+  `move` `_perform_resize()` çağırır (dikey uzat), `release` `save_geom()` yapar;
+  aksi halde eski taşıma. `w.setMouseTracking(True)` ile basılı değilken de üst
+  kenarda `SizeVerCursor`, gerisinde `SizeAllCursor` gösterilir. Böylece pencere
+  üstten yukarı **dikey uzatılabilir** (alt kenar sabit). Kaynak:
+  `sources/10_dikey_resize_fix_2026-08-14.md`.
 - **Kalıcılık:** release'te `save_geom(self._panel_w, self._win_h)` →
   `~/.ekranhisse/ui_geom.json`; açılışta `load_geom()` (font-ölçeği
   `ui_scale.json` desenini yansıtır). Sabit `PANEL_W`/`ekran//2` yerine çalışma

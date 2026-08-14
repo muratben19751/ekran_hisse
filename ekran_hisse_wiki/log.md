@@ -202,3 +202,12 @@ Backlinks 9 sayfada tazelendi, index yeniden üretildi.
 - **Doğrulama:** `pytest -q` → 284 passed (279→284, +5 sparkline testi); `ruff check .` → temiz.
 - **Güncellenen Layer 2:** sparkline (baştan yazıldı: pseudo-HA → çizgi+alan+intraday), data_fetcher (fetch_tv_history eklendi, fetch_tv_rsi→fetch_tv_rsi_bulk düzeltildi, TV Auth G64 çözümüyle güncellendi), stock_row (summary: çizgi sparkline), architecture_overview (data-flow: set_live/restore + fetch_tv_history).
 - Backlinks 9 sayfada tazelendi, index yeniden üretildi.
+
+## 2026-08-14 — Dikey boyutlandırma düzeltmesi (başlık üst kenar çakışması)
+- **İstek:** "uygulama ekranını dikey de uzatabilmeliyim."
+- **Kök neden:** Dikey resize (`_hit_zone`→`'top'`, `_perform_resize`, `WIN_H_MIN`–ekran, `ui_geom.json`) zaten vardı; ama `_head_row` başlık widget'ı pencerenin üstünü kaplayıp `mousePressEvent`'te pencereyi TAŞIDIĞINDAN üst kenardaki resize şeridi gölgeleniyordu → kullanıcı üstten uzatınca pencere taşınıyordu.
+- **Kaynak:** `sources/10_dikey_resize_fix_2026-08-14.md` (immutable snapshot).
+- **Kod (overlay.py, `_head_row`):** üst-kenar-farkındalıklı handler'lar — `_on_top_edge(e)` (yerel `y<=RESIZE_MARGIN`) doğruysa press `_resize_edge="top"`+`_resize_origin` kurar, move `_perform_resize()` (dikey uzat, alt kenar sabit), release `save_geom()`; aksi halde eski taşıma. `setMouseTracking(True)` + üst kenarda `SizeVerCursor`. `RESIZE_MARGIN` 6→8.
+- **Doğrulama:** `ruff check overlay.py` temiz; `pytest -q` → 284 passed; bundle senkron (cmp -s), app restart.
+- **Güncellenen Layer 2:** overlay_window (Sürükleme + Kenar/köşe boyutlandırma bölümlerine üst-kenar devri fix'i, RESIZE_MARGIN 6→8), architecture_overview (Sürükleme→"Sürükleme + dikey boyutlandırma"), known_issues (F7'ye fix notu).
+- Backlinks 9 sayfada tazelendi, index yeniden üretildi.

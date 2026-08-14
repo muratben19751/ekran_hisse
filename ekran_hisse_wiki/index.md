@@ -12,6 +12,7 @@ Bu sayfa `tools/wiki_tools.py index` tarafından her sayfanın frontmatter'ında
 - [[07_oturum_2026-08-14|07 Oturum 2026-08-14]]  (`sources/07_oturum_2026-08-14.md`)
 - [[08_deepr_review_round4_2026-08-14|08 Deepr Review Round4 2026-08-14]]  (`sources/08_deepr_review_round4_2026-08-14.md`)
 - [[09_sparkline_intraday_2026-08-14|09 Sparkline Intraday 2026-08-14]]  (`sources/09_sparkline_intraday_2026-08-14.md`)
+- [[10_dikey_resize_fix_2026-08-14|10 Dikey Resize Fix 2026-08-14]]  (`sources/10_dikey_resize_fix_2026-08-14.md`)
 
 ## Entities (somut bileşenler)
 - [[data_fetcher|DataFetcher]] — TradingView WebSocket üzerinden BIST + ABD (NYSE/NASDAQ) fiyatı, RSI ve sparkline için intraday bar serisi çeken, yfinance bulk-fetch (FX/altın/kripto) kullanan veri katmanı; auth token thread-safe cache + boş-sonuçta invalidasyon, NaN/ZeroDivision, falsy-zero ve tam-sembol eşleme koruması içerir.  (`wiki/entities/data_fetcher.md`)

@@ -122,7 +122,7 @@ PANEL_W = 300            # varsayılan açık panel genişliği (kayıt yoksa)
 PANEL_W_MIN = 220        # kullanıcı boyutlandırma alt sınırı
 PANEL_W_MAX = 900        # üst sınır
 WIN_H_MIN = 200          # pencere yükseklik alt sınırı
-RESIZE_MARGIN = 6        # kenar/köşe yakalama bölgesi kalınlığı (px)
+RESIZE_MARGIN = 8        # kenar/köşe yakalama bölgesi kalınlığı (px)
 TAB_W   = 32
 TAB_H   = 52
 TAB_GAP = 6
@@ -1840,19 +1840,46 @@ class OverlayWindow(QWidget):
         h.addWidget(monitor_btn)
         h.addWidget(status)
 
-        # Başlık satırından sürükleyerek pencereyi taşı
+        # Başlık satırından sürükleyerek pencereyi taşı — AMA başlık satırı
+        # pencerenin en üst kenarını kaplar; ilk RESIZE_MARGIN px'lik şerit dikey
+        # boyutlandırma bölgesidir. Orada basılırsa taşıma yerine resize'a devret
+        # (yoksa üstten uzatmak isteyen kullanıcı pencereyi taşır).
+        def _on_top_edge(e):
+            # başlık widget'ının y'si pencere içinde ~0 olduğundan yerel y yeterli
+            return e.position().toPoint().y() <= RESIZE_MARGIN
         def _head_mouse_press(e):
             if e.button() == Qt.LeftButton:
+                if _on_top_edge(e):
+                    self._resize_edge = "top"
+                    self._resize_origin = (
+                        e.globalPosition().toPoint(), QRect(self.geometry()))
+                    self._drag_pos = None
+                    e.accept()
+                    return
                 self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
         def _head_mouse_move(e):
+            if self._resize_edge is not None and (e.buttons() & Qt.LeftButton):
+                self._perform_resize(e.globalPosition().toPoint())
+                e.accept()
+                return
             if e.buttons() == Qt.LeftButton and self._drag_pos is not None:
                 self.move(e.globalPosition().toPoint() - self._drag_pos)
                 self._current_sc = self.screen().geometry()
+                return
+            # basılı değilken üst kenarda dikey-resize imleci göster
+            w.setCursor(Qt.SizeVerCursor if _on_top_edge(e) else Qt.SizeAllCursor)
         def _head_mouse_release(e):
+            if self._resize_edge is not None:
+                save_geom(self._panel_w, self._win_h)
+                self._resize_edge = None
+                self._resize_origin = None
+                e.accept()
+                return
             self._drag_pos = None
         w.mousePressEvent = _head_mouse_press
         w.mouseMoveEvent = _head_mouse_move
         w.mouseReleaseEvent = _head_mouse_release
+        w.setMouseTracking(True)   # basılı olmadan da imleç geri bildirimi
         w.setCursor(Qt.SizeAllCursor)
 
         # ilk oluşturmada stil uygula

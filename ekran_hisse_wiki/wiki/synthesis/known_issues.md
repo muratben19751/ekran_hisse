@@ -116,7 +116,7 @@ last_updated: 2026-08-14
 | # | Özellik |
 |---|---------|
 | F6 | **Font ölçekleme** — başlık satırında `A−`/`A+`; `_FONT_SCALE` (0.8–1.8), `_f()`/`_sf()` ölçekler, `ui_scale.json` kalıcı, `_rebuild_all_pages` veri-koruyan yeniden kurulum |
-| F7 | **Kenar/köşe boyutlandırma** — sol (genişlik) / üst (yükseklik) / sol-üst köşe sürükle; sağ+alt kenar sabit; `ui_geom.json` kalıcı; `PANEL_W`/`ekran//2` → çalışma zamanı `self._panel_w`/`self._win_h` (bkz. [[overlay_window]]) |
+| F7 | **Kenar/köşe boyutlandırma** — sol (genişlik) / üst (yükseklik) / sol-üst köşe sürükle; sağ+alt kenar sabit; `ui_geom.json` kalıcı; `PANEL_W`/`ekran//2` → çalışma zamanı `self._panel_w`/`self._win_h`. **Fix (2026-08-14):** üst kenar `_head_row` başlık widget'ının altında gölgeleniyordu → dikey uzatma pencereyi taşıyordu; başlık handler'ları üst-kenar-farkındalıklı yapıldı, `RESIZE_MARGIN` 6→8 (bkz. [[overlay_window]]) |
 | F8 | **Sembol evreni kısıtı kaldırıldı** — `is_known` kapısı yerine biçim kontrolü; listede olmayan sembol de eklenip `BIST:<SEM>`/`<SEM>.IS` varsayılan eşlemesiyle çekilir (bkz. [[symbols]]) |
 | F9 | **Hisse taşıma menüsü** — [[stock_row]] sağ-tık "Yukarı taşı"/"Aşağı taşı" (`move_requested(sym, ±1)` → `_move_stock` index takası + `save_stocks`); mevcut sürükle-bırak korunur, menü keşfedilebilir kılar |
 | F10 | **Kâr/Zarar (tutar & %)** — `TargetSheet`'e **Adet** alanı; `logic.compute_pnl(entry, price, qty)` saf fonksiyonu; satırda yeşil/kırmızı `lbl_pnl` (giriş+adet → tutar·%, adet yok → yalnız %, giriş yok → gizli) + tooltip. `qty` `stocks.json`'a eklendi (veri korundu) |

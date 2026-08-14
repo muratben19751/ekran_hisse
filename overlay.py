@@ -23,13 +23,24 @@ from PySide6.QtCore import (
     QEvent,
     QMimeData,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
     Qt,
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QDrag, QFont, QPainter, QPixmap
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QDrag,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -750,10 +761,12 @@ class TargetSheet(_SheetDialog):
 
 # ── Satırlar ────────────────────────────────────────────────────────────────
 class Sparkline(QWidget):
-    """Pseudo Heikin-Ashi sparkline — biriktirilen close fiyatlarından.
-    HA_open[i] = (HA_open[i-1] + HA_close[i-1]) / 2
-    HA_close[i] = close[i]   (sadece close ile yaklaşım)
-    Yeşil mum: HA_close >= HA_open, Kırmızı: HA_close < HA_open
+    """Çizgi sparkline + alan dolgusu — biriktirilen close fiyatlarından.
+
+    Gün içi fiyat akışını yumuşak bir çizgiyle gösterir; çizginin altı hafif
+    bir degrade ile doldurulur, son nokta (anlık fiyat) küçük bir daire ile
+    vurgulanır. Renk yön işaretidir: ilk noktaya göre son nokta >= ise yeşil,
+    aksi halde kırmızı.
     """
 
     MAX = 24
@@ -781,17 +794,6 @@ class Sparkline(QWidget):
             self._points = self._points[-self.MAX:]
         self.update()
 
-    @staticmethod
-    def _ha_candles(closes):
-        """Pseudo-HA: open ve close hesapla."""
-        candles = []
-        ha_open = closes[0]
-        for c in closes:
-            ha_close = c
-            candles.append((ha_open, ha_close))
-            ha_open = (ha_open + ha_close) / 2
-        return candles
-
     def paintEvent(self, _):
         pts = self._points
         n = len(pts)
@@ -801,30 +803,61 @@ class Sparkline(QWidget):
         if w < 4 or h < 2:
             return
 
-        candles = self._ha_candles(pts)
-        all_vals = [v for o, c in candles for v in (o, c)]
-        lo, hi = min(all_vals), max(all_vals)
+        lo, hi = min(pts), max(pts)
         span = (hi - lo) or 1.0
 
-        GAP = 1
-        cw = max(2, (w - GAP * (n - 1)) // n)   # mum genişliği
+        PAD = 1.0
+        # yön: son nokta ilk noktanın üstünde/eşitse yükseliş → yeşil
+        bull = pts[-1] >= pts[0]
+        line_col = QColor(C_GREEN if bull else C_RED)
+        fill_top = QColor(C_GREEN if bull else C_RED)
+
+        def vx(i):
+            return i * (w - 1) / (n - 1)
 
         def vy(v):
             return PAD + (1.0 - (v - lo) / span) * (h - 2 * PAD)
 
-        PAD = 1.0
-        p = QPainter(self)
-        p.setPen(Qt.NoPen)
+        # çizgi yolu
+        line = QPainterPath()
+        line.moveTo(vx(0), vy(pts[0]))
+        for i in range(1, n):
+            line.lineTo(vx(i), vy(pts[i]))
 
-        for i, (ha_open, ha_close) in enumerate(candles):
-            x = int(i * (cw + GAP))
-            bull = ha_close >= ha_open
-            color = QColor(C_GREEN if bull else C_RED)
-            y_top = int(vy(max(ha_open, ha_close)))
-            y_bot = int(vy(min(ha_open, ha_close)))
-            body_h = max(1, y_bot - y_top)
-            p.setBrush(color)
-            p.drawRect(x, y_top, cw, body_h)
+        # alan dolgusu: çizgi + alt kenara kapanan kapalı yol
+        area = QPainterPath(line)
+        area.lineTo(vx(n - 1), h)
+        area.lineTo(vx(0), h)
+        area.closeSubpath()
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        grad = QLinearGradient(0, 0, 0, h)
+        top = QColor(fill_top)
+        top.setAlpha(90)
+        bot = QColor(fill_top)
+        bot.setAlpha(0)
+        grad.setColorAt(0.0, top)
+        grad.setColorAt(1.0, bot)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(grad))
+        p.drawPath(area)
+
+        pen = QPen(line_col)
+        pen.setWidthF(1.4)
+        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(line)
+
+        # son nokta: anlık fiyatı vurgulayan dolu daire
+        ex, ey = vx(n - 1), vy(pts[-1])
+        r = 2.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(line_col)
+        p.drawEllipse(QPointF(ex, ey), r, r)
 
         p.end()
 

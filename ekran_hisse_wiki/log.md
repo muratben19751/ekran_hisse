@@ -241,3 +241,10 @@ Backlinks 9 sayfada tazelendi, index yeniden üretildi.
   .app bundle senkron. lint: 0 broken/orphan/stub.
 - **Ödünleşim (açık, belgeli):** sıralı akış → RSI süresi sembol sayısıyla lineer
   (8 sembol ≈17s); kota=1 hesabın kaçınılmazı. Yüksek-kota oturumla paralele dönülebilir.
+
+## 2026-08-16 — x_watch entegrasyonu
+- Yeni source: sources/13_xwatch_entegrasyon_2026-08-16.md
+- twitter_client.md güncellendi: x_watch köprüsü (twit.muratben.com) + TWITTER_ACCOUNTS=all
+- architecture_overview.md güncellendi: RSSHUB_URL açıklaması x_watch'a güncellendi
+- Lint: 0 hata, 0 orphan, 0 stub
+

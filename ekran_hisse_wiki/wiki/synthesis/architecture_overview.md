@@ -99,11 +99,11 @@ açıkken eklenen sır süreç yeniden başlatılana dek görülmez.
 `GIST_ID` boşsa `notes_api_client._gist_api()` anında `ValueError` fırlatır — sessiz
 geçersiz URL üretilmez.
 
-`config.RSSHUB_URL` (2026-08-13) sır DEĞİL — self-hosted RSSHub köprü tabanı; boşsa
-[[twitter_client]] `http://localhost:1200` varsayar. RSSHub'ın `TWITTER_AUTH_TOKEN`'ı
-RSSHub tarafında tutulur, EkranHisse'de saklanmaz. `config.TWITTER_ACCOUNTS`
-(2026-08-14) sır DEĞİL — izlenecek 𝕏 handle listesi (virgülle); boşsa
-[[twitter_client]] sabit varsayılan seti kullanır. Eski `config.NITTER_INSTANCES`
+`config.RSSHUB_URL` (2026-08-13) sır DEĞİL — tweet köprü tabanı; boşsa
+[[twitter_client]] `http://localhost:1200` varsayar. **2026-08-16'dan beri
+`https://twit.muratben.com` (x_watch projesi).** `config.TWITTER_ACCOUNTS`
+(2026-08-14) sır DEĞİL — izlenecek 𝕏 handle listesi (virgülle); `all` değeri
+x_watch'ın tüm akışını tek istekle çeker. Eski `config.NITTER_INSTANCES`
 DEPRECATED (Nitter ekosistemi çöktü); geriye uyum için okunuyor ama kullanılmıyor.
 
 ## Kalıcılık ve yol politikası

@@ -1,14 +1,15 @@
 ---
 title: twitter_client
 type: entity
-summary: 𝕏/Twitter ağ katmanı — 2026-08-14'ten beri RSSHub user-timeline köprüsü (keyword/arama route'u X tarafında bozuldu: 404→503). Sabit finans hesaplarının timeline'ları çekilir, izlenen sembollere göre süzülür; fetch_recent/fetch_ids (data,err) callback şekli korunur.
+summary: 𝕏/Twitter ağ katmanı — 2026-08-16'dan beri x_watch (twit.muratben.com) köprüsü; TWITTER_ACCOUNTS=all ile tek istek/dakika. Kod değişmedi, yalnızca RSSHUB_URL+TWITTER_ACCOUNTS yapılandırması güncellendi.
 sources:
   - sources/05_nitter_rss_2026-08-13.md
   - sources/07_oturum_2026-08-14.md
   - sources/11_rsshub_user_timeline_2026-08-14.md
+  - sources/13_xwatch_entegrasyon_2026-08-16.md
 related:
   - wiki/synthesis/architecture_overview.md
-last_updated: 2026-08-14
+last_updated: 2026-08-16
 ---
 
 # twitter_client
@@ -29,11 +30,26 @@ Sonuçlar `(data, err)` tuple deseniyle taşınır; hata yutulmaz — çağıran
 1. **X API v2 `search/recent`** — ücretli oldu, kredi bitince **402** (bkz. [[known_issues]]).
 2. **Nitter search RSS** (2026-08-13) — public instance ekosistemi çöktü (403/kapalı/anti-bot).
 3. **RSSHub keyword route** (2026-08-13) — `config.RSSHUB_URL` self-hosted köprü.
-4. **RSSHub user-timeline** (2026-08-14, GÜNCEL) — keyword route X tarafında bozuldu.
+4. **RSSHub user-timeline** (2026-08-14) — keyword route X tarafında bozuldu.
+5. **x_watch (twit.muratben.com)** (2026-08-16, GÜNCEL) — ayrı proje, RSSHub-uyumlu uç, `TWITTER_ACCOUNTS=all`.
 
 Her adımda **public API aynen korundu** → `overlay`/`logic`/testler sözleşmesi değişmedi.
 
-## RSSHub user-timeline köprüsü (2026-08-14) — güncel
+## x_watch köprüsü (2026-08-16) — güncel
+**Ne:** `github.com/muratben19751/tweet` projesi, `https://twit.muratben.com/twitter/user/<handle>?showRetweets=0`
+adresinde RSSHub-uyumlu RSS XML yayınlıyor. Sözleşme twitter_client.py'nin beklediğiyle birebir aynı
+(namespace'siz `<item>`, `dc:creator`, RFC822 `<pubDate>`). **ASLA 503 dönmez** — en kötü ihtimalle boş kanal + 200.
+
+**Yapılandırma (`~/.ekranhisse/notes_config.env`):**
+```
+RSSHUB_URL=https://twit.muratben.com
+TWITTER_ACCOUNTS=all
+```
+`all` handle'ı → x_watch tüm akışı döner (dakikada tek istek). Kod değişikliği yapılmadı.
+
+**Doğrulama (2026-08-16):** `err=None`, 27 tweet, 22 kullanıcı — TTKOM izleme listesinde mevcut, süzgeç geçiyor.
+
+## RSSHub user-timeline köprüsü (2026-08-14) — tarihsel
 **Neden değişti:** RSSHub `keyword` (arama) route'u X tarafında bozuk. Canlı probe:
 `/twitter/keyword/TTKOM` → **503**, RSSHub logu `Twitter API error: 404` (X arama
 GraphQL endpoint'i 404). Token GEÇERLİ (`/twitter/user/elonmusk` → **200**); iki

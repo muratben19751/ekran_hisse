@@ -43,6 +43,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -55,6 +56,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTextEdit,
+
     QVBoxLayout,
     QWidget,
 )
@@ -158,6 +160,13 @@ C_BLUE_HOVER = "#3d9bff"
 C_YELLOW    = "#ffd60a"
 C_SHEET_BG  = "rgba(44, 44, 46, 246)"
 C_TINT_TGT  = "rgba(255, 214, 10, 20)"
+
+# Tüm widget stylesheet'lerine eklenen QToolTip kuralı — macOS'ta parent
+# stylesheet'i child'ın kendi stylesheet'i ezdiği için her widget'a gömülmesi gerekir.
+_SS_TOOLTIP = (
+    "QToolTip { color: #000000; background: #ffffff; border: 1px solid #aaaaaa;"
+    " font-weight: bold; padding: 4px 8px; opacity: 255; }"
+)
 C_TINT_NEW  = "rgba(10, 132, 255, 20)"
 
 MIME_ROW = "application/x-ekranhisse-symbol"
@@ -178,6 +187,7 @@ SCALE_FILE = paths.data_file("ui_scale.json")
 # kenardan boyutlandırınca ~/.ekranhisse altında kalıcı. _WIN_H_SAVED None ise
 # "ekran//2 varsayılanını kullan" demektir (kullanıcı henüz boyutlandırmadı).
 GEOM_FILE = paths.data_file("ui_geom.json")
+NOTIFY_FILE = paths.data_file("ui_notify.json")
 _PANEL_W_SAVED = PANEL_W
 _WIN_H_SAVED = None
 
@@ -305,6 +315,18 @@ def _save_json(path, data):
                 pass
 
 
+def _load_notify():
+    try:
+        with open(NOTIFY_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("tw_notify", True))
+    except (OSError, ValueError):
+        return True
+
+
+def _save_notify(enabled):
+    _save_json(NOTIFY_FILE, {"tw_notify": enabled})
+
+
 # stocks.json okunamadığında (bozuk/OSError) True olur: bu oturumda save_stocks
 # BLOKLANIR. Aksi halde açılışta [] yüklenip kullanıcının ilk işlemi tüm portföyü
 # ezerdi (geri dönülemez veri kaybı). Bozuk dosya ayrıca .corrupt olarak yedeklenir.
@@ -404,6 +426,7 @@ def _pill(text, primary=False, width=None):
         f"QPushButton {{ background: {bg}; color: {fg}; border: none;"
         f" border-radius: {R_BTN}px; padding: 0 12px; }}"
         f"QPushButton:hover {{ background: {hov}; color: #ffffff; }}"
+        + _SS_TOOLTIP
     )
     return b
 
@@ -418,6 +441,7 @@ def _flat(text, color=None):
         f"QPushButton {{ background: transparent; border: none; padding: 0 2px;"
         f" color: {color or C_TEXT3}; text-align: left; }}"
         f"QPushButton:hover {{ color: {color or C_TEXT}; }}"
+        + _SS_TOOLTIP
     )
     return b
 
@@ -475,6 +499,7 @@ class _SheetDialog(QDialog):
             f"QLineEdit {{ background: {C_FIELD}; border: 1px solid {C_BORDER};"
             f" border-radius: {R_BTN}px; color: {C_TEXT}; padding: 0 9px; }}"
             f"QLineEdit:focus {{ border-color: {C_BLUE}; }}"
+            + _SS_TOOLTIP
         )
         v.addWidget(cap)
         v.addWidget(inp)
@@ -1030,6 +1055,7 @@ class StockRow(QWidget):
         self.setStyleSheet(
             f"#row {{ background: {tint}; }}"
             f"#row:hover {{ background: {C_ROW_HOVER}; }}"
+            + _SS_TOOLTIP
         )
 
     def _sync_height(self):
@@ -1318,6 +1344,10 @@ class OverlayWindow(QWidget):
 
     def __init__(self, signals):
         super().__init__()
+        self.setStyleSheet(
+            "QToolTip { color: #000000; background: #ffffff; border: 1px solid #cccccc;"
+            " font-weight: bold; padding: 3px 6px; }"
+        )
         self._signals = signals
         self._mode = 0
         self._fetching = False
@@ -1341,6 +1371,7 @@ class OverlayWindow(QWidget):
         self._tw_rows = None         # [(sym, row_widget)] — _twitter_render kurar
         self._tw_chip_widgets = []   # [(sym_or_None, chip_widget)]
         self._tw_symbols = load_tw_symbols()   # izlenen semboller (kalıcı)
+        self._tw_notify = _load_notify()
 
         self._pinned = False
         # Varsayılan floating KAPALI: açıkken aynı sekmeye tekrar tıklama ve
@@ -1774,6 +1805,54 @@ class OverlayWindow(QWidget):
         else:
             self.tab_badge.hide()
 
+    def _show_tweet_toast(self, count):
+        if not getattr(self, "_tw_notify", True):
+            return
+        if getattr(self, "_tw_toast", None) and self._tw_toast.isVisible():
+            return
+        msg = f"+{count} yeni tweet"
+        toast = QWidget(self)
+        toast.setObjectName("twToast")
+        toast.setAttribute(Qt.WA_StyledBackground, True)
+        toast.setStyleSheet(
+            "#twToast { background: #1d9bf0; border-radius: 6px; }"
+        )
+        hl = QHBoxLayout(toast)
+        hl.setContentsMargins(10, 5, 6, 5)
+        hl.setSpacing(8)
+        lbl = QLabel(msg)
+        lbl.setFont(_f(10, QFont.Medium))
+        lbl.setStyleSheet("color: #ffffff; background: transparent;")
+        close_btn = QPushButton("✕")
+        close_btn.setFlat(True)
+        close_btn.setFont(_f(10))
+        close_btn.setStyleSheet(
+            "color: #ffffff; background: transparent; border: none; padding: 0 2px;"
+        )
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(toast.hide)
+        hl.addWidget(lbl)
+        hl.addWidget(close_btn)
+        toast.adjustSize()
+        # twitter_page'in sağ üst köşesine, ana pencere koordinatlarında yerleştir
+        tp = self.twitter_page
+        tr = tp.mapTo(self, tp.rect().topRight())
+        toast.move(tr.x() - toast.width() - 8, tr.y() + 8)
+        toast.show()
+        toast.raise_()
+        self._tw_toast = toast
+
+    def _toggle_tw_notify(self, checked):
+        self._tw_notify = checked
+        _save_notify(self._tw_notify)
+        if not self._tw_notify and getattr(self, "_tw_toast", None):
+            self._tw_toast.hide()
+
+    def _update_tw_notify_style(self):
+        if not hasattr(self, "chk_tw_notify"):
+            return
+        self.chk_tw_notify.setChecked(getattr(self, "_tw_notify", True))
+
     def _control_button(self, glyph, tooltip, handler, registry, monitor=False):
         """Başlık kontrol butonu (pin/float/monitor) üret — tek yerden.
 
@@ -1796,7 +1875,10 @@ class OverlayWindow(QWidget):
                 f"QLabel {{ color: {C_TEXT2}; background: rgba(255,255,255,20);"
                 f" border-radius: {R_BTN}px; }}"
                 f"QLabel:hover {{ color: {C_TEXT}; background: {C_CTRL_HOVER}; }}"
+                + _SS_TOOLTIP
             )
+        else:
+            b.setStyleSheet(_SS_TOOLTIP)
         if monitor:
             b.setVisible(len(QApplication.screens()) > 1)
         registry.append(b)
@@ -2070,6 +2152,13 @@ class OverlayWindow(QWidget):
         self.lbl_twitter_status = QLabel("")
         self.lbl_twitter_status.setFont(_f(10))
         self.lbl_twitter_status.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        self.chk_tw_notify = QCheckBox("bildirim")
+        self.chk_tw_notify.setFont(_f(10))
+        self.chk_tw_notify.setStyleSheet("color: #ffffff; background: transparent;" + _SS_TOOLTIP)
+        self.chk_tw_notify.setToolTip("Yeni tweet bildirimi aç/kapat")
+        self.chk_tw_notify.setChecked(getattr(self, "_tw_notify", True))
+        self.chk_tw_notify.toggled.connect(self._toggle_tw_notify)
+        self._update_tw_notify_style()
 
         # Pin/float/monitor kontrolleri — Portföy/Notlar başlıklarıyla tutarlı
         # olsun diye Twitter başlığına da eklenir (aksi halde bu sekmedeyken
@@ -2092,6 +2181,7 @@ class OverlayWindow(QWidget):
         h.addWidget(self.lbl_twitter_status)
         h.addStretch()
         h.addWidget(self.btn_tw_read)
+        h.addWidget(self.chk_tw_notify)
         h.addWidget(zoom_out_btn)
         h.addWidget(zoom_in_btn)
         h.addWidget(pin_btn)
@@ -2180,6 +2270,7 @@ class OverlayWindow(QWidget):
         w.setStyleSheet(
             f"#chip {{ background: {bg}; border-radius: 5px; }}"
             f"#chip:hover {{ background: {C_BLUE if active else 'rgba(255,255,255,34)'}; }}"
+            + _SS_TOOLTIP
         )
         lbl = getattr(w, "_chip_lbl", None)
         cnt = getattr(w, "_chip_cnt", None)
@@ -2223,6 +2314,7 @@ class OverlayWindow(QWidget):
             f"#twrow {{ background: {C_TINT_NEW if unread else 'transparent'};"
             f" border-bottom: 1px solid {C_HAIRLINE}; }}"
             f"#twrow:hover {{ background: {C_ROW_HOVER}; }}"
+            + _SS_TOOLTIP
         )
         tweet_url = f"https://twitter.com/i/web/status/{tw.get('id', '')}"
         row.mousePressEvent = lambda e, u=tweet_url: subprocess.Popen(["open", u])
@@ -2525,6 +2617,7 @@ class OverlayWindow(QWidget):
         if recovered and not self._tw_tweets and not getattr(self, "_tw_loading", False):
             self._twitter_load()
             return
+        _fresh_count = len(incoming - self._tw_seen)
         new_ids, self._tw_seen = compute_unread(
             incoming, self._tw_seen, active=(self._mode == 3))
         self._prune_tw_seen(incoming)
@@ -2532,6 +2625,8 @@ class OverlayWindow(QWidget):
             self._tw_unread |= new_ids
             self._tw_hl |= new_ids
             self._update_tab_badge()
+        if _fresh_count > 0 and self._mode != 3:
+            self._show_tweet_toast(_fresh_count)
 
     # ── Panel aç/kapat ──────────────────────────────────────────────────
     def _quit_menu(self, event):

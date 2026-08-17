@@ -32,5 +32,18 @@ EkranHisse.app/Contents/Resources/twitter_client.py
 EkranHisse.app/Contents/Resources/applog.py
 EkranHisse.app/Contents/Resources/symbols.py
 EkranHisse.app/Contents/Resources/symbols.json
+EkranHisse.app/Contents/Resources/paths.py
 EkranHisse.app/Contents/Resources/.ekranhisse.lock
+
+# Cache ve sanal ortamlar
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.corrupt*
+
+# UI kalıcı durum dosyaları
+ui_geom.json
+ui_scale.json
+ui_notify.json
 

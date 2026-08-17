@@ -1,7 +1,7 @@
 ---
 title: OverlayWindow
 type: entity
-summary: Ana pencere widget'ı; şeffaf macOS overlay olarak sağ-alta yaslı açılır, hisse/Twitter/not sekmelerini barındırır; floating, monitör geçişi, sürükleme, kenar/köşe boyutlandırma ve font ölçekleme destekler.
+summary: Ana pencere widget'ı; şeffaf macOS overlay olarak sağ-alta yaslı açılır, hisse/Twitter/not sekmelerini barındırır; floating, monitör geçişi, çoklu tweet pop-up yığını, kenar/köşe boyutlandırma ve font ölçekleme destekler.
 sources:
   - sources/01_proje_ozet.md
   - sources/02_deepr_review_2026-08-11.md
@@ -9,7 +9,8 @@ sources:
   - sources/06_reorder_pnl_2026-08-13.md
   - sources/07_oturum_2026-08-14.md
   - sources/10_dikey_resize_fix_2026-08-14.md
-last_updated: 2026-08-14
+  - sources/14_coklu_tweet_popup_2026-08-18.md
+last_updated: 2026-08-18
 ---
 
 # OverlayWindow
@@ -111,7 +112,34 @@ Her [[stock_row]] sağ-tık menüsünden yönetilir:
   kullanılır (DRY). Sürükle-bırak (`RowsHost.dropped` → `_on_dropped`) yöntemi de
   korunur; menü onu keşfedilebilir kılar.
 
+## Çoklu Tweet Bildirim & Pop-up Yığını (2026-08-18)
+- **`TweetPopupCard`**: Bağımsız `Qt.Window` seviyesinde HUD kartı. `showEvent` içinde
+  `_set_ns_window_level(1003, _COLLECTION_BEHAVIOR)` ile tüm masaüstlerinde ve tam
+  ekran pencerelerin en üstünde yüzer. Kart üzerinde yazar adı (`@author`), tweet
+  metni, sıra bilgisi (`(1/3)`) ve `✕` kapat butonu bulunur. Tıklanınca EkranHisse
+  𝕏 sekmesini açar.
+- **`TweetPopupManager`**: Birden fazla tweet geldiğinde ekranın sağ üst köşesinden
+  başlayarak alt alta yığar (`reposition_cards`). Kullanıcı bir kartı kapattığında
+  alttaki kartlar otomatik olarak yukarı kayarak yerini alır.
+- **Kalıcı Görünüm**: Otomatik kapanma yerine kullanıcı kapatana kadar ekranda açık kalır.
+- **macOS Sistem Bildirimi**: `_send_macos_notification` (`osascript`) ile Notification
+  Center üzerinden eşzamanlı native banner fırlatılır.
+- **Test ve Tercih**: 𝕏 başlığına `🔔 test` butonu ve `chk_tw_notify` kutusu eklendi;
+  tercih `~/.ekranhisse/ui_notify.json`'da saklanır.
+
+## Çoklu Monitör Sheet Konumlandırması (2026-08-18)
+- `_SheetDialog._place` ana pencerenin aktif monitörünü (`parent.screen()`) ve
+  `availableGeometry` alanını sorgular. İkincil monitörlerde sheet pencereleri
+  (`TargetSheet`, `StockPickerSheet`, `TextSheet`) ana pencereyle aynı ekranda
+  hizalı kalır.
+
 ## Önemli fixler
+
+### 2026-08-18
+- **Çoklu Tweet Pop-up Kartları & Yığın Kaydırma:** `TweetPopupCard` + `TweetPopupManager`
+  ile çoklu tweet'ler sağ üstte alt alta listelenir; kapatılan kartın altındakiler yukarı çıkar.
+- **Çoklu Monitör Sheet Uyumu:** `_SheetDialog._place` ekran geometrisi koruması.
+- **Linter & Test:** Sıfır lint hatası, 301 test %100 başarılı.
 
 ### 2026-08-14
 - **VİOP çarpanı:** `TargetSheet`'e "Çarpan" alanı (sembol başına serbest, boş/1=normal,

@@ -504,3 +504,56 @@ def test_sparkline_setlive_guards_none_nan(app):
     sp.set_live(float("nan"))
     assert sp._points == [10, 11, 12]  # None/NaN yok sayıldı
 
+
+# ── Tweet Bildirim & Popup Toast Testleri ────────────────────────────────────
+def test_show_tweet_popup_sends_notification_and_stacked_cards(win, monkeypatch):
+    sent = []
+    monkeypatch.setattr(overlay, "_send_macos_notification", lambda t, m: sent.append((t, m)))
+    win._tw_notify = True
+    tweets = [
+        {"text": "THYAO yükseldi", "author_id": "borsagundem"},
+        {"text": "TTKOM tavan", "author_id": "finansci"},
+    ]
+    win._show_tweet_popup(2, tweet_list=tweets)
+    assert len(sent) == 1
+    assert "borsagundem" in sent[0][1]
+    assert len(win.popup_manager.cards) == 2
+
+
+def test_popup_manager_repositions_on_close(win):
+    tweets = [
+        {"text": "Tweet 1", "author_id": "user1"},
+        {"text": "Tweet 2", "author_id": "user2"},
+        {"text": "Tweet 3", "author_id": "user3"},
+    ]
+    win._tw_notify = True
+    win.popup_manager.show_tweets(tweets)
+    assert len(win.popup_manager.cards) == 3
+
+    card0 = win.popup_manager.cards[0]
+    card1 = win.popup_manager.cards[1]
+    y1_before = card1.y()
+
+    # İlk kartı kapat → 2. kart yukarı (y1_before'dan daha yukarı) çıkmalı
+    card0._on_close_clicked()
+    assert len(win.popup_manager.cards) == 2
+    assert win.popup_manager.cards[0] is card1
+    assert card1.y() < y1_before
+
+
+def test_show_tweet_popup_suppressed_when_disabled(win, monkeypatch):
+    sent = []
+    monkeypatch.setattr(overlay, "_send_macos_notification", lambda t, m: sent.append((t, m)))
+    win._tw_notify = False
+    win._show_tweet_popup(3)
+    assert sent == []
+
+
+def test_toggle_tw_notify_triggers_popup_on_enable(win, monkeypatch):
+    popups = []
+    monkeypatch.setattr(win, "_show_tweet_popup", lambda *args, **kwargs: popups.append((args, kwargs)))
+    win._toggle_tw_notify(True)
+    assert len(popups) == 1
+
+
+

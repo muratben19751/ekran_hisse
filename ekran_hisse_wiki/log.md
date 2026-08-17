@@ -248,3 +248,16 @@ Backlinks 9 sayfada tazelendi, index yeniden üretildi.
 - architecture_overview.md güncellendi: RSSHUB_URL açıklaması x_watch'a güncellendi
 - Lint: 0 hata, 0 orphan, 0 stub
 
+## 2026-08-18 — Çoklu Monitör Sheet Konumlandırması & Çoklu Tweet Pop-up Kartları
+- **Yeni Kaynak:** `sources/14_coklu_tweet_popup_2026-08-18.md` (immutable).
+- **Çoklu Monitör Uyumu (`_SheetDialog._place`):** İkincil ekranlarda sheet pencerelerinin (`TargetSheet`, `StockPickerSheet`, `TextSheet`) ana pencereden ayrışmasını engelleyen `parent.screen()` ve `availableGeometry` algılaması eklendi. `_main_screen()` null guard'ı eklendi.
+- **Çoklu Tweet Pop-up Yığını (`TweetPopupCard` + `TweetPopupManager`):**
+  - Bağımsız `Qt.Window` seviyesinde Always-On-Top (`level=1003`) HUD bildirim kartları.
+  - Birden fazla tweet geldiğinde sağ üst köşeden başlayarak alt alta yığılır (`(1/3)`, `(2/3)` vb.).
+  - Bir kart `✕` ile kapatıldığında alttaki tüm kartlar otomatik olarak yukarı kayarak yerini alır (`reposition_cards`).
+  - Kapatılana kadar ekranda kalıcı kalır. Karta tıklanınca 𝕏 sekmesini açar.
+- **macOS Bildirimi & Test:** `_send_macos_notification` (`osascript`) ile Notification Center banner'ı, 𝕏 başlığına `🔔 test` butonu ve `chk_tw_notify` kutusu eklendi (`ui_notify.json`).
+- **Doğrulama:** `ruff check .` temiz (0 hata), `pytest` 301 test %100 başarılı; .app bundle senkronlandı.
+- **Güncellenen Sayfalar:** [[overlay_window]], [[architecture_overview]].
+
+

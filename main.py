@@ -42,6 +42,7 @@ atexit.register(_cleanup_lock)
 sys.path = [p for p in sys.path if not p.endswith(('numpy', 'numpy/core'))]
 
 from PySide6.QtCore import QObject, QTimer, Signal  # noqa: E402
+from PySide6.QtGui import QColor, QPalette  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from overlay import _COLLECTION_BEHAVIOR, OverlayWindow, _set_ns_window_level  # noqa: E402
@@ -60,6 +61,15 @@ def _set_window_level(window):
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    # Tooltip: beyaz zemin, siyah bold metin — tüm uygulama genelinde
+    app.setStyleSheet(
+        "QToolTip { color: #000000; background: #ffffff; border: 1px solid #aaaaaa;"
+        " font-weight: bold; padding: 4px 8px; opacity: 255; }"
+    )
+    pal = app.palette()
+    pal.setColor(QPalette.ToolTipBase, QColor("#ffffff"))
+    pal.setColor(QPalette.ToolTipText, QColor("#000000"))
+    app.setPalette(pal)
 
     signals = _AppSignals()
 

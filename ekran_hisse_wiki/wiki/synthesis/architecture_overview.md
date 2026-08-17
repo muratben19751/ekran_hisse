@@ -10,7 +10,8 @@ sources:
   - sources/09_sparkline_intraday_2026-08-14.md
   - sources/10_dikey_resize_fix_2026-08-14.md
   - sources/12_tv_seri_limiti_sirali_akis_2026-08-14.md
-last_updated: 2026-08-14
+  - sources/14_coklu_tweet_popup_2026-08-18.md
+last_updated: 2026-08-18
 ---
 
 # Mimari Genel Bakış
@@ -119,11 +120,11 @@ gelen kaydı güvenli hale getirir (sayı değilse `None`, `symbol` yoksa satır
 kullanıcı verisi asla silinmez. ABD hisseleri düz `"AAPL"` olarak saklanır; borsa
 prefix'i runtime'da [[symbols]] `tv_symbol`/`yf_ticker` ile çözülür (şema değişmedi).
 
-**UI tercihleri (2026-08-13):** aynı dizinde iki kalıcı UI dosyası daha:
-`ui_scale.json` (font ölçeği `_FONT_SCALE`) ve `ui_geom.json` (panel genişliği +
-pencere yüksekliği). İkisi de aynı `load_*`/`save_*` + atomik `_save_json` desenini
-kullanır; kullanıcı verisi değil UI durumu olduğundan silinmeleri portföyü/notları
-etkilemez. Bkz. [[overlay_window]].
+**UI tercihleri (2026-08-13 / 2026-08-18):** aynı dizinde üç kalıcı UI dosyası daha:
+`ui_scale.json` (font ölçeği `_FONT_SCALE`), `ui_geom.json` (panel genişliği +
+pencere yüksekliği) ve `ui_notify.json` (𝕏 tweet bildirimleri açık/kapalı tercihi).
+Üçü de aynı `load_*`/`save_*` + atomik `_save_json` desenini kullanır; kullanıcı
+verisi değil UI durumu olduğundan silinmeleri portföyü/notları etkilemez. Bkz. [[overlay_window]].
 
 ## Uygulama paketi senkronizasyonu
 `EkranHisse.app/Contents/Resources/` içindeki `.py` dosyaları proje kökündeki kaynaklarla özdeş tutulur. **Tek aktif kaynak proje köküdür.**

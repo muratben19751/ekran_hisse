@@ -33,6 +33,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QDrag,
     QFont,
     QLinearGradient,
@@ -56,7 +57,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTextEdit,
-
     QVBoxLayout,
     QWidget,
 )
@@ -269,15 +269,26 @@ _tw_ago = tw_ago
 
 
 def _main_screen():
-    return QApplication.primaryScreen().geometry()
+    if QApplication.instance():
+        pri = QApplication.primaryScreen()
+        if pri:
+            return pri.geometry()
+    return QRect(0, 0, 1920, 1080)
 
 
 def _set_ns_window_level(win, level: int = 1001, collection_behavior=None, make_key: bool = False):
     """macOS NSWindow seviyesini ve davranışını ayarla. macOS dışında no-op."""
     try:
+        wid = int(win.winId()) if win else 0
+        if not wid:
+            return
         import objc
-        ns_view = objc.objc_object(c_void_p=int(win.winId()))
+        ns_view = objc.objc_object(c_void_p=wid)
+        if ns_view is None or not hasattr(ns_view, "window"):
+            return
         ns_win = ns_view.window()
+        if ns_win is None:
+            return
         ns_win.setLevel_(level)
         ns_win.setHidesOnDeactivate_(False)
         if collection_behavior is not None:
@@ -286,6 +297,17 @@ def _set_ns_window_level(win, level: int = 1001, collection_behavior=None, make_
             ns_win.makeKeyAndOrderFront_(None)
     except Exception as e:
         log.warning("_set_ns_window_level: %s", e)
+
+
+def _send_macos_notification(title: str, message: str):
+    """macOS Bildirim Merkezi'ne (Notification Center) banner popup gönder."""
+    try:
+        safe_msg = message.replace('"', '\\"')
+        safe_title = title.replace('"', '\\"')
+        script = f'display notification "{safe_msg}" with title "{safe_title}"'
+        subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log.warning("macOS bildirimi gönderilemedi: %s", e)
 
 
 _save_warned = set()
@@ -506,14 +528,21 @@ class _SheetDialog(QDialog):
         return wrap, inp
 
     def _place(self, w, h):
-        sc = QApplication.primaryScreen().availableGeometry()
+        parent = self.parent()
+        parent_scr = parent.screen() if (parent and hasattr(parent, "screen") and parent.screen()) else (QApplication.primaryScreen() if QApplication.instance() else None)
+        sc = parent_scr.availableGeometry() if parent_scr else QRect(0, 0, 1920, 1080)
         self.box.setGeometry(0, 0, w, h)
         self.resize(w, h)
-        # Sheet'i açık panelin SOLUNA yerleştir; panel genişliği kullanıcı
-        # boyutlandırmasıyla değişebildiğinden çalışma zamanı değerini kullan.
-        pw = getattr(self.parent(), "_panel_w", PANEL_W)
-        x = sc.x() + sc.width() - TAB_W - pw - w - 8
-        y = sc.y() + (sc.height() - h) // 2
+        # Sheet'i açık panelin SOLUNA yerleştir; parent pencereye göre konumlandır
+        if parent and hasattr(parent, "x") and hasattr(parent, "y"):
+            x = parent.x() - w - 8
+            x = max(sc.x(), min(x, sc.x() + sc.width() - w))
+            y = parent.y() + (parent.height() - h) // 2
+            y = max(sc.y(), min(y, sc.y() + sc.height() - h))
+        else:
+            pw = getattr(parent, "_panel_w", PANEL_W)
+            x = sc.x() + sc.width() - TAB_W - pw - w - 8
+            y = sc.y() + (sc.height() - h) // 2
         self.move(x, y)
         QTimer.singleShot(0, lambda: _set_ns_window_level(self, level=1002, make_key=True))
 
@@ -1323,6 +1352,195 @@ class RowsHost(QWidget):
         self.dropped.emit(moved, target, is_header)
 
 
+class TweetPopupCard(QWidget):
+    """Tek bir tweet için ekranda yüzen bağımsız bildirim kartı."""
+
+    closed = Signal(object)  # Kapatıldığında kendisini iletir
+
+    def __init__(self, tweet_data: dict, index: int = 1, total: int = 1, parent_window=None):
+        super().__init__(
+            None,
+            Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint
+        )
+        self._parent_window = parent_window
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setCursor(Qt.PointingHandCursor)
+
+        author = tweet_data.get("author_id", "") or tweet_data.get("author", "")
+        text = tweet_data.get("text", "")
+
+        box = QFrame(self)
+        box.setObjectName("popBox")
+        box.setStyleSheet(
+            "#popBox { background: rgba(20, 22, 26, 250); border: 1.5px solid #1d9bf0;"
+            " border-radius: 12px; }"
+            "#popBox:hover { background: rgba(30, 34, 42, 255); border-color: #55b7f7; }"
+        )
+
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(14, 11, 12, 11)
+        lay.setSpacing(10)
+
+        # İkon
+        icon_lbl = QLabel("𝕏")
+        icon_lbl.setFont(_f(16, QFont.Bold))
+        icon_lbl.setStyleSheet("color: #1d9bf0; background: transparent;")
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(icon_lbl)
+
+        # Metin alanı
+        v = QVBoxLayout()
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+
+        # Başlık ve Yazar
+        h_top = QHBoxLayout()
+        h_top.setContentsMargins(0, 0, 0, 0)
+        h_top.setSpacing(6)
+
+        author_str = f"@{author}" if author else "𝕏 Finans"
+        author_lbl = QLabel(author_str)
+        author_lbl.setFont(_f(11, QFont.Bold))
+        author_lbl.setStyleSheet("color: #ffffff; background: transparent;")
+        h_top.addWidget(author_lbl)
+
+        if total > 1:
+            idx_lbl = QLabel(f"({index}/{total})")
+            idx_lbl.setFont(_f(9, QFont.Medium))
+            idx_lbl.setStyleSheet("color: #9ca3af; background: transparent;")
+            h_top.addWidget(idx_lbl)
+
+        h_top.addStretch()
+        v.addLayout(h_top)
+
+        if text:
+            snippet = text if len(text) <= 110 else text[:107] + "…"
+            sub = QLabel(snippet)
+            sub.setFont(_f(10))
+            sub.setStyleSheet("color: #d1d5db; background: transparent;")
+            sub.setWordWrap(True)
+            v.addWidget(sub)
+        else:
+            sub = QLabel("Yeni tweet akışa düştü.")
+            sub.setFont(_f(10))
+            sub.setStyleSheet("color: #9ca3af; background: transparent;")
+            v.addWidget(sub)
+
+        lay.addLayout(v, 1)
+
+        # Kapat butonu
+        close_btn = QPushButton("✕")
+        close_btn.setFlat(True)
+        close_btn.setFont(_f(11))
+        close_btn.setFixedSize(20, 20)
+        close_btn.setStyleSheet(
+            "QPushButton { color: #9ca3af; background: transparent; border: none; font-weight: bold; }"
+            "QPushButton:hover { color: #ffffff; background: rgba(255, 255, 255, 35); border-radius: 10px; }"
+        )
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self._on_close_clicked)
+        lay.addWidget(close_btn, 0, Qt.AlignTop)
+
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+        main_lay.addWidget(box)
+
+        self.setFixedWidth(_sf(340))
+        self.adjustSize()
+
+    def _on_close_clicked(self):
+        self.closed.emit(self)
+        self.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        _set_ns_window_level(self, level=1003, collection_behavior=_COLLECTION_BEHAVIOR)
+        self.raise_()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self._parent_window:
+                self._parent_window._toggle(3)
+                self._parent_window.raise_()
+                self._parent_window.activateWindow()
+            self._on_close_clicked()
+        super().mousePressEvent(event)
+
+
+class TweetPopupManager:
+    """Birden fazla tweet geldiğinde ekranda alt alta kartlar halinde gösteren,
+    biri kapatıldığında alttakileri yukarı kaydıran yönetici.
+    """
+
+    def __init__(self, parent_window):
+        self.parent_window = parent_window
+        self.cards = []
+
+    def show_tweets(self, tweets: list):
+        """Gelen tweet listesini ekranda alt alta kartlar halinde göster."""
+        if not tweets:
+            return
+        if not getattr(self.parent_window, "_tw_notify", True):
+            return
+
+        max_cards = 6
+        incoming_tweets = tweets[:max_cards]
+        total = len(incoming_tweets)
+
+        # Eski açık kartları temizle
+        self.clear()
+
+        for idx, tw in enumerate(incoming_tweets, start=1):
+            tweet_obj = tw if isinstance(tw, dict) else {"text": str(tw)}
+            card = TweetPopupCard(tweet_obj, index=idx, total=total, parent_window=self.parent_window)
+            card.closed.connect(self._on_card_closed)
+            self.cards.append(card)
+
+        self.reposition_cards()
+
+        for card in self.cards:
+            card.show()
+            card.raise_()
+
+    def _on_card_closed(self, closed_card):
+        if closed_card in self.cards:
+            self.cards.remove(closed_card)
+        self.reposition_cards()
+
+    def reposition_cards(self):
+        """Tüm açık kartları ekranın sağ üstünden başlayarak alt alta yeniden hizala."""
+        if not self.cards:
+            return
+
+        screen = None
+        if self.parent_window and hasattr(self.parent_window, "screen") and self.parent_window.screen():
+            screen = self.parent_window.screen()
+        elif QApplication.instance():
+            screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+
+        sc = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        start_x = sc.x() + sc.width() - _sf(340) - 24
+        current_y = sc.y() + 48
+        gap = 8
+
+        for card in self.cards:
+            card.adjustSize()
+            card.move(start_x, current_y)
+            current_y += card.height() + gap
+
+    def clear(self):
+        for card in self.cards:
+            try:
+                card.close()
+            except Exception:
+                pass
+        self.cards.clear()
+
+
+TweetPopupWindow = TweetPopupCard
+
+
 # ── Ana pencere ─────────────────────────────────────────────────────────────
 class OverlayWindow(QWidget):
     # Poll worker (arka plan thread) yeni tweet id'lerini bu sinyalle
@@ -1372,6 +1590,7 @@ class OverlayWindow(QWidget):
         self._tw_chip_widgets = []   # [(sym_or_None, chip_widget)]
         self._tw_symbols = load_tw_symbols()   # izlenen semboller (kalıcı)
         self._tw_notify = _load_notify()
+        self.popup_manager = TweetPopupManager(self)
 
         self._pinned = False
         # Varsayılan floating KAPALI: açıkken aynı sekmeye tekrar tıklama ve
@@ -1445,6 +1664,7 @@ class OverlayWindow(QWidget):
         self._twitter_poll_timer = QTimer(self)
         self._twitter_poll_timer.timeout.connect(self._twitter_poll)
         self._twitter_poll_timer.start(60_000)
+        QTimer.singleShot(4000, self._twitter_poll)
         # Ardışık poll hatasında aralık exponential büyür (RSSHub kapalıyken her
         # 60sn'de boşa istek yapılmasın); başarıda tabana sıfırlanır.
         self._tw_poll_base_ms = 60_000
@@ -1805,47 +2025,86 @@ class OverlayWindow(QWidget):
         else:
             self.tab_badge.hide()
 
+    def _show_tweet_popup(self, count: int, latest_tweet: dict = None, tweet_list: list = None):
+        """Yeni tweet düştüğünde ekranda alt alta kartlar halinde göster ve macOS bildirimi gönder."""
+        if not getattr(self, "_tw_notify", True):
+            return
+
+        tweets_to_show = []
+        if tweet_list:
+            tweets_to_show = list(tweet_list)
+        elif latest_tweet:
+            tweets_to_show = [latest_tweet]
+        elif self._tw_tweets:
+            tweets_to_show = self._tw_tweets[:count]
+
+        if not tweets_to_show:
+            tweets_to_show = [{"text": f"+{count} yeni tweet akışa düştü.", "author_id": "EkranHisse"}]
+
+        # 1. macOS Sistem Bildirimi (Notification Center)
+        first_tw = tweets_to_show[0] if tweets_to_show else {}
+        author = first_tw.get("author_id", "") or first_tw.get("author", "")
+        text = first_tw.get("text", "")
+        msg = f"+{count} yeni tweet akışa düştü."
+        if text:
+            snippet = text if len(text) <= 60 else text[:57] + "…"
+            msg = f"@{author}: {snippet}" if author else snippet
+        _send_macos_notification("EkranHisse — 𝕏 Akışı", msg)
+
+        # 2. Görsel Ekranda Alt Alta Kartlar (Manager aracılığıyla)
+        try:
+            if hasattr(self, "popup_manager"):
+                self.popup_manager.show_tweets(tweets_to_show)
+        except Exception as e:
+            log.warning("Tweet popup manager hatası: %s", e)
+
+        # 3. Eğer kullanıcı o an Twitter sekmesindeyse arayüz içi toast'ı da göster
+        if self._mode == 3 and hasattr(self, "twitter_page"):
+            self._show_tweet_toast(count)
+
     def _show_tweet_toast(self, count):
         if not getattr(self, "_tw_notify", True):
             return
-        if getattr(self, "_tw_toast", None) and self._tw_toast.isVisible():
-            return
-        msg = f"+{count} yeni tweet"
-        toast = QWidget(self)
-        toast.setObjectName("twToast")
-        toast.setAttribute(Qt.WA_StyledBackground, True)
-        toast.setStyleSheet(
-            "#twToast { background: #1d9bf0; border-radius: 6px; }"
-        )
-        hl = QHBoxLayout(toast)
-        hl.setContentsMargins(10, 5, 6, 5)
-        hl.setSpacing(8)
-        lbl = QLabel(msg)
-        lbl.setFont(_f(10, QFont.Medium))
-        lbl.setStyleSheet("color: #ffffff; background: transparent;")
-        close_btn = QPushButton("✕")
-        close_btn.setFlat(True)
-        close_btn.setFont(_f(10))
-        close_btn.setStyleSheet(
-            "color: #ffffff; background: transparent; border: none; padding: 0 2px;"
-        )
-        close_btn.setCursor(Qt.PointingHandCursor)
-        close_btn.clicked.connect(toast.hide)
-        hl.addWidget(lbl)
-        hl.addWidget(close_btn)
-        toast.adjustSize()
-        # twitter_page'in sağ üst köşesine, ana pencere koordinatlarında yerleştir
-        tp = self.twitter_page
-        tr = tp.mapTo(self, tp.rect().topRight())
-        toast.move(tr.x() - toast.width() - 8, tr.y() + 8)
-        toast.show()
-        toast.raise_()
-        self._tw_toast = toast
+        if self._mode == 3 and hasattr(self, "twitter_page"):
+            if getattr(self, "_tw_toast", None) and self._tw_toast.isVisible():
+                return
+            toast = QWidget(self)
+            toast.setObjectName("twToast")
+            toast.setAttribute(Qt.WA_StyledBackground, True)
+            toast.setStyleSheet(
+                "#twToast { background: #1d9bf0; border-radius: 6px; }"
+            )
+            hl = QHBoxLayout(toast)
+            hl.setContentsMargins(10, 5, 6, 5)
+            hl.setSpacing(8)
+            lbl = QLabel(f"+{count} yeni tweet")
+            lbl.setFont(_f(10, QFont.Medium))
+            lbl.setStyleSheet("color: #ffffff; background: transparent;")
+            close_btn = QPushButton("✕")
+            close_btn.setFlat(True)
+            close_btn.setFont(_f(10))
+            close_btn.setStyleSheet(
+                "color: #ffffff; background: transparent; border: none; padding: 0 2px;"
+            )
+            close_btn.setCursor(Qt.PointingHandCursor)
+            close_btn.clicked.connect(toast.hide)
+            hl.addWidget(lbl)
+            hl.addWidget(close_btn)
+            toast.adjustSize()
+            tp = self.twitter_page
+            tr = tp.mapTo(self, tp.rect().topRight())
+            toast.move(tr.x() - toast.width() - 8, tr.y() + 8)
+            toast.show()
+            toast.raise_()
+            self._tw_toast = toast
 
     def _toggle_tw_notify(self, checked):
         self._tw_notify = checked
         _save_notify(self._tw_notify)
-        if not self._tw_notify and getattr(self, "_tw_toast", None):
+        if self._tw_notify:
+            # Kullanıcı bildirimi açtığında veya test ettiğinde anında görsel teyit pop-up'ı göster
+            self._show_tweet_popup(1, {"text": "Yeni tweet bildirimleri aktif.", "author_id": "EkranHisse"})
+        elif getattr(self, "_tw_toast", None):
             self._tw_toast.hide()
 
     def _update_tw_notify_style(self):
@@ -2160,6 +2419,21 @@ class OverlayWindow(QWidget):
         self.chk_tw_notify.toggled.connect(self._toggle_tw_notify)
         self._update_tw_notify_style()
 
+        self.btn_tw_test = _flat("🔔 test")
+        self.btn_tw_test.setFont(_f(10))
+        self.btn_tw_test.setStyleSheet("color: #1d9bf0; background: transparent; padding: 0 4px;" + _SS_TOOLTIP)
+        self.btn_tw_test.setToolTip("Pop-up bildirimini ekranda hemen test et")
+        self.btn_tw_test.clicked.connect(
+            lambda: self._show_tweet_popup(
+                3,
+                tweet_list=[
+                    {"text": "BIST 100 endeksi günü rekor seviyede kapattı.", "author_id": "borsagundem"},
+                    {"text": "THYAO ve TTKOM hisselerinde güçlü alımlar devam ediyor.", "author_id": "finans_kulubu"},
+                    {"text": "Merkez Bankası faiz kararı metni yayımlandı: Beklentiler korundu.", "author_id": "ekonomihaber"},
+                ]
+            )
+        )
+
         # Pin/float/monitor kontrolleri — Portföy/Notlar başlıklarıyla tutarlı
         # olsun diye Twitter başlığına da eklenir (aksi halde bu sekmedeyken
         # kullanıcı pencereyi sabitleyemez/floating yapamaz/monitör değiştiremez).
@@ -2182,6 +2456,7 @@ class OverlayWindow(QWidget):
         h.addStretch()
         h.addWidget(self.btn_tw_read)
         h.addWidget(self.chk_tw_notify)
+        h.addWidget(self.btn_tw_test)
         h.addWidget(zoom_out_btn)
         h.addWidget(zoom_in_btn)
         h.addWidget(pin_btn)
@@ -2550,8 +2825,13 @@ class OverlayWindow(QWidget):
             self._tw_hl = new_ids
             if self._mode != 3:
                 self._tw_unread |= new_ids
+            if new_ids:
+                fresh_tweets = [tw for tw in tweets if tw.get("id") in new_ids] if tweets else []
+                self._show_tweet_popup(len(new_ids), tweet_list=fresh_tweets)
         else:
             self._tw_hl = set()
+            if tweets:
+                self._show_tweet_popup(len(tweets), tweet_list=tweets[:3])
         self._tw_last = datetime.now().strftime("%H:%M")
         self.lbl_tw_time.setText(f"son: {self._tw_last}")
         self._twitter_render()
@@ -2625,8 +2905,12 @@ class OverlayWindow(QWidget):
             self._tw_unread |= new_ids
             self._tw_hl |= new_ids
             self._update_tab_badge()
-        if _fresh_count > 0 and self._mode != 3:
-            self._show_tweet_toast(_fresh_count)
+        if _fresh_count > 0:
+            if not self._tw_tweets and not getattr(self, "_tw_loading", False):
+                self._twitter_load()
+            else:
+                fresh_tweets = [tw for tw in self._tw_tweets if tw.get("id") in new_ids] if self._tw_tweets else []
+                self._show_tweet_popup(_fresh_count, tweet_list=fresh_tweets or self._tw_tweets[:_fresh_count])
 
     # ── Panel aç/kapat ──────────────────────────────────────────────────
     def _quit_menu(self, event):

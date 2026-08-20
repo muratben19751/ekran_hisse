@@ -52,8 +52,10 @@ def test_tv_symbol():
 @pytest.mark.parametrize("sym,expected", [
     ("XAUUSD", True),
     ("xauusd", True),
+    ("BTCUSD", True),
     ("THYAO", False),
-    ("XU100", True),
+    ("XU100", False),
+    ("XU030", False),
 ])
 def test_is_special(sym, expected):
     assert sym_universe.is_special(sym) is expected

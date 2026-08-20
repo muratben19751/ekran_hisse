@@ -541,30 +541,6 @@
     "DOW": {
       "yf": "^DJI",
       "tv": "DJ:DJI"
-    },
-    "XU100": {
-      "yf": "XU100.IS",
-      "tv": "BIST:XU100"
-    },
-    "XU030": {
-      "yf": "XU030.IS",
-      "tv": "BIST:XU030"
-    },
-    "XBANK": {
-      "yf": "XBANK.IS",
-      "tv": "BIST:XBANK"
-    },
-    "XUSIN": {
-      "yf": "XUSIN.IS",
-      "tv": "BIST:XUSIN"
-    },
-    "XHOLD": {
-      "yf": "XHOLD.IS",
-      "tv": "BIST:XHOLD"
-    },
-    "XTCRT": {
-      "yf": "XTCRT.IS",
-      "tv": "BIST:XTCRT"
     }
   },
   "us": {

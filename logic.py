@@ -235,27 +235,31 @@ def sanitize_stocks(stocks):
     return out
 
 
-def compute_pnl(entry, price, qty=None, mult=None):
+def compute_pnl(entry, price, qty=None, mult=None, side=None):
     """Giriş fiyatı + güncel fiyat (+ opsiyonel adet, çarpan) → (tutar, yüzde).
 
     Döndürür `(amount, pct)`:
       - `entry`/`price` None ya da `entry == 0` ise `(None, None)` — hesap yok.
-      - `pct` = `(price - entry) / entry * 100` (giriş+fiyat varsa her zaman).
-      - `amount` = `(price - entry) * qty * mult` yalnızca `qty` geçerli bir sayı ve
-        `> 0` ise; aksi halde `None` (adet opsiyonel — girilmezse yalnız yüzde).
-        `mult` VİOP gibi kontrat çarpanıdır (ör. 100); geçersiz/None/≤0 ise 1 sayılır.
-        Yüzdeyi ETKİLEMEZ — sadece tutarı ölçekler.
-    Long/short ayrımı yok: negatif tutar/yüzde zararı gösterir.
+      - Long: `pct` = `(price - entry) / entry * 100`
+      - Short: `pct` = `(entry - price) / entry * 100`
+      - `side` = "short" ise short yön kullanılır; aksi halde long.
+      - `amount` = `pct/100 * entry * qty * mult` yalnızca `qty` geçerli ise.
+        `mult` VİOP kontrat çarpanıdır (ör. 100); geçersiz/None/≤0 ise 1 sayılır.
     """
     if entry is None or price is None or entry == 0:
         return None, None
     if not (math.isfinite(entry) and math.isfinite(price)):
         return None, None
-    pct = (price - entry) / entry * 100
+    if side == "short":
+        pct = (entry - price) / entry * 100
+        diff = entry - price
+    else:
+        pct = (price - entry) / entry * 100
+        diff = price - entry
     amount = None
     if isinstance(qty, (int, float)) and not isinstance(qty, bool) and qty > 0:
         m = mult if isinstance(mult, (int, float)) and not isinstance(mult, bool) and mult > 0 else 1
-        amount = (price - entry) * qty * m
+        amount = diff * qty * m
     return amount, pct
 
 

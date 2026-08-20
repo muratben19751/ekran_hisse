@@ -95,6 +95,7 @@ from notes_api_client import fetch_notes, save_notes
 _LEGACY_DIR = os.path.dirname(os.path.abspath(__file__))
 STOCKS_FILE = paths.data_file("stocks.json")
 TW_SYMBOLS_FILE = paths.data_file("tw_symbols.json")
+JOURNAL_FILE = paths.data_file("journal.json")
 _LEGACY_STOCKS = os.path.join(_LEGACY_DIR, "stocks.json")
 _LEGACY_TW = os.path.join(_LEGACY_DIR, "tw_symbols.json")
 REFRESH_INTERVAL_MS = 60_000
@@ -414,6 +415,22 @@ def save_stocks(stocks):
     _save_json(STOCKS_FILE, stocks)
 
 
+def load_journal():
+    if not os.path.exists(JOURNAL_FILE):
+        return []
+    try:
+        with open(JOURNAL_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.error("journal.json okunamadı: %s", e)
+        return []
+
+
+def save_journal(journal):
+    _save_json(JOURNAL_FILE, journal)
+
+
 def load_tw_symbols():
     """𝕏 takip sembolleri; dosya yoksa/bozuksa varsayılan ['TTKOM']."""
     _migrate_legacy(TW_SYMBOLS_FILE, _LEGACY_TW)
@@ -437,8 +454,9 @@ def save_tw_symbols(symbols):
 def _pill(text, primary=False, width=None):
     b = QPushButton(text)
     b.setCursor(Qt.PointingHandCursor)
-    b.setFont(_f(12, QFont.Medium))
-    b.setFixedHeight(24)
+    b.setFont(_f(14, QFont.Medium))
+    b.setFixedHeight(28)
+    b.setToolTip("")
     if width:
         b.setFixedWidth(width)
     bg   = C_BLUE if primary else C_CTRL
@@ -512,11 +530,11 @@ class _SheetDialog(QDialog):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(5)
         cap = QLabel(caption)
-        cap.setFont(_f(11))
+        cap.setFont(_f(13))
         cap.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         inp = QLineEdit(value)
-        inp.setFont(_f(13))
-        inp.setFixedHeight(26)
+        inp.setFont(_f(15))
+        inp.setFixedHeight(32)
         inp.setStyleSheet(
             f"QLineEdit {{ background: {C_FIELD}; border: 1px solid {C_BORDER};"
             f" border-radius: {R_BTN}px; color: {C_TEXT}; padding: 0 9px; }}"
@@ -690,23 +708,38 @@ class StockPickerSheet(_SheetDialog):
 
 class TargetSheet(_SheetDialog):
     """Giriş + çıkış hedefi + adet + çarpan tek sheet'te
-    (result: ('save', e, x, qty, mult) | ('clear',) | None)."""
+    (result: ('save', e, x, qty, mult, side) | ('clear',) | None)."""
 
-    def __init__(self, symbol, entry=None, exit_price=None, qty=None, mult=None, parent=None):
+    def __init__(self, symbol, entry=None, exit_price=None, qty=None, mult=None, side=None, broker=None, parent=None):
         super().__init__(parent)
         head = QWidget()
         h = QHBoxLayout(head)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
         sym = QLabel(symbol)
-        sym.setFont(_f(13, QFont.DemiBold))
+        sym.setFont(_f(15, QFont.DemiBold))
         sym.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
         sub = QLabel("giriş / çıkış / adet / çarpan")
-        sub.setFont(_f(12))
+        sub.setFont(_f(13))
         sub.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         h.addWidget(sym)
         h.addWidget(sub)
         h.addStretch()
+
+        # LONG / SHORT toggle
+        self._is_long = True if (side != "short") else False
+        self.btn_long  = _pill("LONG")
+        self.btn_short = _pill("SHORT")
+        self.btn_long.setCheckable(True)
+        self.btn_short.setCheckable(True)
+        self.btn_long.setChecked(self._is_long)
+        self.btn_short.setChecked(not self._is_long)
+        self._apply_side_style()
+        self.btn_long.clicked.connect(lambda: self._set_side(True))
+        self.btn_short.clicked.connect(lambda: self._set_side(False))
+        h.addWidget(self.btn_long)
+        h.addWidget(self.btn_short)
+
         self.lay.addWidget(head)
 
         fields = QHBoxLayout()
@@ -718,7 +751,6 @@ class TargetSheet(_SheetDialog):
         self.inp_entry.setPlaceholderText("62,30")
         self.inp_exit.setPlaceholderText("71,00")
         self.inp_qty.setPlaceholderText("100")
-        # VİOP kontratlarında lot çarpanı (ör. 100). Boş = 1 (normal hisse).
         self.inp_mult.setPlaceholderText("1")
         self.inp_mult.setToolTip("VİOP kontrat çarpanı (ör. 100). Boş = 1.\n"
                                  "Yalnızca Kâr/Zarar tutarını ölçekler, fiyat/yüzdeyi değil.")
@@ -727,6 +759,27 @@ class TargetSheet(_SheetDialog):
         fields.addWidget(w3)
         fields.addWidget(w4)
         self.lay.addLayout(fields)
+
+        # Aracı kurum seçimi
+        broker_row = QHBoxLayout()
+        broker_row.setContentsMargins(0, 2, 0, 0)
+        broker_row.setSpacing(6)
+        lbl_broker = QLabel("Aracı Kurum:")
+        lbl_broker.setFont(_f(10))
+        lbl_broker.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        broker_row.addWidget(lbl_broker)
+        self._broker = broker or ""
+        self._broker_btns = {}
+        for name in ("GYT", "İŞYT"):
+            btn = _pill(name)
+            btn.setCheckable(True)
+            btn.setChecked(self._broker == name)
+            btn.clicked.connect(lambda _, n=name: self._set_broker(n))
+            self._broker_btns[name] = btn
+            broker_row.addWidget(btn)
+        broker_row.addStretch()
+        self.lay.addLayout(broker_row)
+        self._apply_broker_style()
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
@@ -753,7 +806,54 @@ class TargetSheet(_SheetDialog):
         cancel.clicked.connect(self.reject)
         clear.clicked.connect(self._clear)
         self.inp_entry.setFocus()
-        self._place(460, 150)
+        self._place(520, 180)
+
+    def _set_broker(self, name):
+        self._broker = name if self._broker != name else ""
+        self._apply_broker_style()
+
+    def _apply_broker_style(self):
+        for name, btn in self._broker_btns.items():
+            btn.setChecked(self._broker == name)
+            if self._broker == name:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background: {C_BLUE}; color: #fff; border: none;"
+                    f" border-radius: {R_BTN}px; padding: 0 11px; font-weight: bold; }}"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background: transparent; color: {C_TEXT3}; border: 1px solid {C_BORDER};"
+                    f" border-radius: {R_BTN}px; padding: 0 11px; }}"
+                    f"QPushButton:hover {{ color: {C_TEXT}; }}"
+                )
+
+    def _set_side(self, is_long):
+        self._is_long = is_long
+        self.btn_long.setChecked(is_long)
+        self.btn_short.setChecked(not is_long)
+        self._apply_side_style()
+
+    def _apply_side_style(self):
+        if self._is_long:
+            self.btn_long.setStyleSheet(
+                f"QPushButton {{ background: {C_GREEN}; color: #0d1f14; border: none;"
+                f" border-radius: {R_BTN}px; padding: 0 11px; font-weight: bold; }}"
+            )
+            self.btn_short.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {C_TEXT3}; border: 1px solid {C_BORDER};"
+                f" border-radius: {R_BTN}px; padding: 0 11px; }}"
+                f"QPushButton:hover {{ color: {C_TEXT}; }}"
+            )
+        else:
+            self.btn_short.setStyleSheet(
+                f"QPushButton {{ background: {C_RED}; color: #1f0d0d; border: none;"
+                f" border-radius: {R_BTN}px; padding: 0 11px; font-weight: bold; }}"
+            )
+            self.btn_long.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {C_TEXT3}; border: 1px solid {C_BORDER};"
+                f" border-radius: {R_BTN}px; padding: 0 11px; }}"
+                f"QPushButton:hover {{ color: {C_TEXT}; }}"
+            )
 
     # Boş girdi ile geçersiz girdiyi AYIRT etmek için sentinel: boş alan hedefi
     # bilinçli olarak temizler (None, geçerli); '71x' gibi çözümlenemeyen girdi
@@ -805,7 +905,7 @@ class TargetSheet(_SheetDialog):
                      self.inp_qty if bad_qty else self.inp_mult)
             first.setFocus()
             return
-        self.result_value = ("save", entry, exit_, qty, mult)
+        self.result_value = ("save", entry, exit_, qty, mult, "long" if self._is_long else "short", self._broker)
         self.accept()
 
     def _clear(self):
@@ -814,6 +914,85 @@ class TargetSheet(_SheetDialog):
 
 
 # ── Satırlar ────────────────────────────────────────────────────────────────
+
+
+class _JournalCloseSheet(_SheetDialog):
+    """Trade kapat: çıkış fiyatı + aracı kurum + tarih.
+    result_value = (exit_price, broker, exit_date_str) veya None."""
+
+    def __init__(self, trade, parent=None, current_price=None):
+        import datetime as _dt
+        super().__init__(parent)
+        sym = trade.get("symbol", "")
+        head = QWidget()
+        h = QHBoxLayout(head)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        lbl_sym = QLabel(sym)
+        lbl_sym.setFont(_f(15, QFont.DemiBold))
+        lbl_sym.setStyleSheet(f"color: {C_TEXT}; background: transparent;")
+        lbl_sub = QLabel("pozisyonu kapat")
+        lbl_sub.setFont(_f(13))
+        lbl_sub.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        h.addWidget(lbl_sym)
+        h.addWidget(lbl_sub)
+        h.addStretch()
+        self.lay.addWidget(head)
+
+        exit_default = _tr(current_price) if current_price is not None else ""
+        fields = QHBoxLayout()
+        fields.setSpacing(10)
+        w1, self.inp_exit   = self._field("Çıkış Fiyatı", exit_default)
+        w2, self.inp_broker = self._field("Aracı Kurum", trade.get("broker", ""))
+        w3, self.inp_date   = self._field("Çıkış Tarihi",
+                                           _dt.date.today().strftime("%Y-%m-%d"))
+        self.inp_exit.setPlaceholderText("75,00")
+        self.inp_broker.setPlaceholderText("İş Yatırım")
+        fields.addWidget(w1)
+        fields.addWidget(w2)
+        fields.addWidget(w3)
+        self.lay.addLayout(fields)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        cancel = _pill("İptal")
+        ok = _pill("Kapat", primary=True)
+        bar.addStretch()
+        bar.addWidget(cancel)
+        bar.addWidget(ok)
+        self.lay.addLayout(bar)
+
+        self.result_value = None
+        ok.clicked.connect(self._save)
+        self.inp_exit.returnPressed.connect(self._save)
+        cancel.clicked.connect(self.reject)
+        self.inp_exit.setFocus()
+        self._place(480, 160)
+
+    _INVALID = object()
+
+    def _num(self, text):
+        text = text.strip()
+        if not text:
+            return None
+        try:
+            return _parse_price(text)
+        except ValueError:
+            return self._INVALID
+
+    def _save(self):
+        exit_p = self._num(self.inp_exit.text())
+        if exit_p is self._INVALID or exit_p is None:
+            self.inp_exit.setStyleSheet(
+                f"QLineEdit {{ background: {C_FIELD}; border: 1px solid {C_RED};"
+                f" border-radius: {R_BTN}px; color: {C_TEXT}; padding: 0 9px; }}"
+            )
+            self.inp_exit.setFocus()
+            return
+        broker = self.inp_broker.text().strip()
+        exit_date = self.inp_date.text().strip() or ""
+        self.result_value = (exit_p, broker, exit_date)
+        self.accept()
 class Sparkline(QWidget):
     """Çizgi sparkline + alan dolgusu — biriktirilen close fiyatlarından.
 
@@ -951,14 +1130,17 @@ class Sparkline(QWidget):
 
 class StockRow(QWidget):
     remove_requested = Signal(str)
-    levels_changed   = Signal(str, object, object, object, object)
+    levels_changed   = Signal(str, object, object, object, object, object, object)  # +broker
     move_requested   = Signal(str, int)
+    close_requested  = Signal(str)  # pozisyon kapat
 
-    def __init__(self, symbol, entry=None, exit_price=None, qty=None, mult=None, parent=None):
+    def __init__(self, symbol, entry=None, exit_price=None, qty=None, mult=None, side=None, broker=None, parent=None):
         super().__init__(parent)
         self.symbol = symbol
         self._entry, self._exit, self._qty, self._price = entry, exit_price, qty, None
         self._mult = mult
+        self._side = side  # "long" | "short" | None
+        self._broker = broker or ""
         self._press_pos = None
         self._reached = False
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -1030,13 +1212,34 @@ class StockRow(QWidget):
         self.lbl_pnl.setFont(_f(9, QFont.DemiBold))
         self.lbl_pnl.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         self.lbl_pnl.setVisible(False)
+        self.lbl_side = QLabel("")
+        self.lbl_side.setFont(_f(8, QFont.Bold))
+        self.lbl_side.setVisible(False)
         self.lbl_rsi = QLabel("")
         self.lbl_rsi.setFont(_f(9))
         self.lbl_rsi.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
         self.lbl_rsi.setVisible(False)
+        self.lbl_entry = QLabel("")
+        self.lbl_entry.setFont(_f(9))
+        self.lbl_entry.setStyleSheet(f"color: {C_TEXT3}; background: transparent;")
+        self.lbl_entry.setVisible(False)
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setFont(_f(8, QFont.Bold))
+        self.btn_close.setFixedHeight(_sf(14))
+        self.btn_close.setCursor(Qt.PointingHandCursor)
+        self.btn_close.setStyleSheet(
+            f"QPushButton {{ background: rgba(220,80,80,180); color: #fff;"
+            f" border-radius: {_sf(7)}px; padding: 0 6px; border: none; }}"
+            f" QPushButton:hover {{ background: rgba(220,80,80,230); }}"
+        )
+        self.btn_close.setVisible(False)
+        self.btn_close.clicked.connect(lambda: self.close_requested.emit(self.symbol))
         ml.addWidget(self.lbl_pnl)
+        ml.addWidget(self.lbl_side)
+        ml.addWidget(self.lbl_entry)
         ml.addStretch()
         ml.addWidget(self.lbl_rsi)
+        ml.addWidget(self.btn_close)
         self.meta.setVisible(False)
 
         outer.addWidget(top)
@@ -1093,7 +1296,7 @@ class StockRow(QWidget):
         isHidden() kullanılır (isVisible değil): parent gizliyken de widget'ın
         AÇIK gizlenme durumunu doğru raporlar.
         """
-        has_meta = (not self.lbl_pnl.isHidden()) or (not self.lbl_rsi.isHidden())
+        has_meta = (not self.lbl_pnl.isHidden()) or (not self.lbl_rsi.isHidden()) or (not self.lbl_side.isHidden())
         self.meta.setVisible(has_meta)
         self.setFixedHeight(_sf(40 if has_meta else 26))
 
@@ -1107,8 +1310,9 @@ class StockRow(QWidget):
             # hedefe ≥ ile, ALTındaysa (short) ≤ ile ulaşır. Eski 'price >=
             # max(entry,exit)' yalnızca long'u düşünüyordu; short hedefte hiç
             # tetiklenmez, girişin üstünde yanlışlıkla 'ulaşıldı' yanardı.
+            is_long = self._exit >= self._entry
             if self._price is not None:
-                if self._exit >= self._entry:
+                if is_long:
                     self._reached = self._price >= self._exit
                 else:
                     self._reached = self._price <= self._exit
@@ -1117,10 +1321,30 @@ class StockRow(QWidget):
             )
             tip = f"Giriş {_tr(self._entry)}  ·  Çıkış {_tr(self._exit)}"
 
+        # LONG/SHORT: side alanı varsa onu kullan; yoksa entry/exit'ten çıkar
+        if self._entry is not None:
+            if self._side is not None:
+                is_long = (self._side == "long")
+            elif self._exit is not None:
+                is_long = self._exit >= self._entry
+            else:
+                is_long = True
+            side_txt = "LONG" if is_long else "SHORT"
+            side_bg  = C_GREEN if is_long else C_RED
+            self.lbl_side.setText(side_txt)
+            self.lbl_side.setStyleSheet(
+                f"color: {'#0d1f14' if is_long else '#1f0d0d'};"
+                f" background: {side_bg}; border-radius: 2px;"
+                f" padding: 0px 4px;"
+            )
+            self.lbl_side.setVisible(True)
+        else:
+            self.lbl_side.setVisible(False)
+
         # Kâr/Zarar: yalnızca giriş fiyatı (exit hedefi gerekmez). Adet varsa
         # tutar da hesaplanır (compute_pnl). Etiket satırda görünür + tooltip'e
         # eklenir; giriş yoksa gizli.
-        amount, pct = compute_pnl(self._entry, self._price, self._qty, self._mult)
+        amount, pct = compute_pnl(self._entry, self._price, self._qty, self._mult, self._side)
         if pct is None:
             self.lbl_pnl.setVisible(False)
         else:
@@ -1135,6 +1359,15 @@ class StockRow(QWidget):
             self.lbl_pnl.setVisible(True)
             if self._entry is not None:
                 tip = (tip + "  ·  " if tip else "") + txt
+
+        # Giriş fiyatı etiketi + Close butonu — yalnızca aktif pozisyonda
+        if self._entry is not None:
+            self.lbl_entry.setText(f"@{_tr(self._entry)}")
+            self.lbl_entry.setVisible(True)
+            self.btn_close.setVisible(True)
+        else:
+            self.lbl_entry.setVisible(False)
+            self.btn_close.setVisible(False)
 
         self.setToolTip(tip)
         self._sync_height()
@@ -1209,23 +1442,24 @@ class StockRow(QWidget):
 
     def _open_target(self):
         dlg = TargetSheet(self.symbol, self._entry, self._exit, self._qty, self._mult,
-                          parent=self.window())
+                          side=self._side, broker=self._broker, parent=self.window())
         dlg.exec()
         res = dlg.result_value
         if not res:
             return
         if res[0] == "clear":
-            self._entry = self._exit = self._qty = self._mult = None
+            self._entry = self._exit = self._qty = self._mult = self._side = self._broker = None
         else:
-            self._entry, self._exit, self._qty, self._mult = res[1], res[2], res[3], res[4]
+            self._entry, self._exit, self._qty, self._mult, self._side, self._broker = \
+                res[1], res[2], res[3], res[4], res[5], res[6]
         self._sync_target()
         self.levels_changed.emit(
-            self.symbol, self._entry, self._exit, self._qty, self._mult)
+            self.symbol, self._entry, self._exit, self._qty, self._mult, self._side, self._broker)
 
     def _clear_target(self):
-        self._entry = self._exit = self._qty = self._mult = None
+        self._entry = self._exit = self._qty = self._mult = self._side = self._broker = None
         self._sync_target()
-        self.levels_changed.emit(self.symbol, None, None, None, None)
+        self.levels_changed.emit(self.symbol, None, None, None, None, None, None)
 
 
 class GroupHeader(QWidget):
@@ -1404,6 +1638,24 @@ class TweetPopupCard(QWidget):
         author_lbl.setFont(_f(11, QFont.Bold))
         author_lbl.setStyleSheet("color: #ffffff; background: transparent;")
         h_top.addWidget(author_lbl)
+
+        # Mesaj saati
+        import datetime as _dt
+        created_at = tweet_data.get("created_at", "")
+        time_str = ""
+        if created_at:
+            try:
+                dt = _dt.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                dt_local = dt.astimezone()
+                time_str = dt_local.strftime("%H:%M")
+            except Exception:
+                pass
+        if not time_str:
+            time_str = _dt.datetime.now().strftime("%H:%M")
+        time_lbl = QLabel(time_str)
+        time_lbl.setFont(_f(9))
+        time_lbl.setStyleSheet("color: #9ca3af; background: transparent;")
+        h_top.addWidget(time_lbl)
 
         if total > 1:
             idx_lbl = QLabel(f"({index}/{total})")
@@ -1722,10 +1974,12 @@ class OverlayWindow(QWidget):
         self.tab_stock = self._make_tab("◧", 1)
         self.tab_notes = self._make_tab("✎", 2)
         self.tab_twitter = self._make_tab("𝕏", 3)
+        self.tab_journal = self._make_tab("⊞", 4)
         tc.addStretch()
         tc.addWidget(self.tab_stock)
         tc.addWidget(self.tab_notes)
         tc.addWidget(self.tab_twitter)
+        tc.addWidget(self.tab_journal)
 
         self.panel = QWidget()
         self.panel.setObjectName("panel")
@@ -1750,6 +2004,9 @@ class OverlayWindow(QWidget):
         self.twitter_page = self._build_twitter_page()
         self.twitter_page.setVisible(False)
         pnl.addWidget(self.twitter_page)
+        self.journal_page = self._build_journal_page()
+        self.journal_page.setVisible(False)
+        pnl.addWidget(self.journal_page)
 
         root.addWidget(self.panel)
         root.addWidget(tab_col)
@@ -2352,7 +2609,10 @@ class OverlayWindow(QWidget):
         self.notes_editor = QTextEdit()
         self.notes_editor.setPlaceholderText("Not içeriği…")
         self.notes_editor.setEnabled(False)
-        self.notes_editor.setFont(_f(11))
+        _nf = QFont("Helvetica Neue")
+        _nf.setStyleHint(QFont.SansSerif)
+        _nf.setPointSizeF(_f(11).pointSizeF())
+        self.notes_editor.setFont(_nf)
         self.notes_editor.setStyleSheet(
             f"QTextEdit {{ background: transparent; border: none;"
             f" color: {C_TEXT2}; padding: 10px 12px; }}"
@@ -2499,6 +2759,309 @@ class OverlayWindow(QWidget):
         bl.addWidget(b_ref)
         pnl.addWidget(bar)
         return page
+
+    def _build_journal_page(self):
+        page = QWidget()
+        pnl = QVBoxLayout(page)
+        pnl.setContentsMargins(0, 0, 0, 0)
+        pnl.setSpacing(0)
+
+        head, self.lbl_journal_status = self._head_row("Trade Journal")
+        pnl.addWidget(head)
+
+        # Açık pozisyonlar başlığı
+        lbl_open = QLabel("  Açık Pozisyonlar")
+        lbl_open.setFont(_f(10, QFont.DemiBold))
+        lbl_open.setFixedHeight(22)
+        lbl_open.setStyleSheet(
+            f"color: {C_TEXT3}; background: rgba(255,255,255,8);"
+            f" border-bottom: 1px solid {C_HAIRLINE};"
+        )
+        pnl.addWidget(lbl_open)
+
+        self.journal_open_host = QWidget()
+        self.journal_open_host.setStyleSheet("background: transparent;")
+        self.journal_open_layout = QVBoxLayout(self.journal_open_host)
+        self.journal_open_layout.setContentsMargins(0, 2, 0, 2)
+        self.journal_open_layout.setSpacing(2)
+        self.journal_open_layout.setAlignment(Qt.AlignTop)
+        pnl.addWidget(self._scroll_area(self.journal_open_host), 1)
+
+        # Kapalı işlemler başlığı
+        lbl_closed = QLabel("  Geçmiş İşlemler")
+        lbl_closed.setFont(_f(10, QFont.DemiBold))
+        lbl_closed.setFixedHeight(22)
+        lbl_closed.setStyleSheet(
+            f"color: {C_TEXT3}; background: rgba(255,255,255,8);"
+            f" border-bottom: 1px solid {C_HAIRLINE};"
+            f" border-top: 1px solid {C_HAIRLINE};"
+        )
+        pnl.addWidget(lbl_closed)
+
+        self.journal_closed_host = QWidget()
+        self.journal_closed_host.setStyleSheet("background: transparent;")
+        self.journal_closed_layout = QVBoxLayout(self.journal_closed_host)
+        self.journal_closed_layout.setContentsMargins(0, 2, 0, 2)
+        self.journal_closed_layout.setSpacing(2)
+        self.journal_closed_layout.setAlignment(Qt.AlignTop)
+        pnl.addWidget(self._scroll_area(self.journal_closed_host), 1)
+
+        bar, bl = self._foot_row()
+        b_ref = _flat("↻ Yenile")
+        b_ref.clicked.connect(self._journal_load)
+        bl.addStretch()
+        bl.addWidget(b_ref)
+        pnl.addWidget(bar)
+        return page
+
+    def _journal_load(self):
+        """Portföydeki entry'li sembolleri açık pozisyon olarak göster;
+        journal.json'daki kapalı işlemleri geçmiş olarak listele."""
+        # Açık: stocks'tan entry olan, sep olmayan satırlar
+        open_trades = [
+            s for s in self.stocks
+            if s.get("entry") is not None
+            and not s["symbol"].startswith(_SEP_SYMBOL)
+        ]
+        # Kapalı: journal.json'dan status=="closed"
+        journal = load_journal()
+        closed_trades = [t for t in journal if t.get("status") == "closed"]
+
+        # Açık pozisyon widget'larını yeniden çiz
+        while self.journal_open_layout.count():
+            w = self.journal_open_layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+        if not open_trades:
+            lbl = QLabel("Açık pozisyon yok")
+            lbl.setFont(_f(10))
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(f"color: {C_TEXT3}; background: transparent; padding: 8px;")
+            self.journal_open_layout.addWidget(lbl)
+        else:
+            for s in open_trades:
+                self.journal_open_layout.addWidget(self._journal_row(s, closed=False))
+
+        # Kapalı işlem widget'larını yeniden çiz
+        while self.journal_closed_layout.count():
+            w = self.journal_closed_layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+        if not closed_trades:
+            lbl = QLabel("Geçmiş işlem yok")
+            lbl.setFont(_f(10))
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(f"color: {C_TEXT3}; background: transparent; padding: 8px;")
+            self.journal_closed_layout.addWidget(lbl)
+        else:
+            for t in reversed(closed_trades):
+                self.journal_closed_layout.addWidget(self._journal_row(t, closed=True))
+
+        self.lbl_journal_status.setText(
+            f"{len(open_trades)} açık · {len(closed_trades)} kapalı"
+        )
+
+    def _journal_row(self, trade, closed=False):
+        """Tek bir trade satırı widget'ı."""
+        import datetime as _dt
+        row = QWidget()
+        row.setStyleSheet(
+            f"QWidget {{ background: transparent; border-bottom: 1px solid {C_HAIRLINE}; }}"
+            f"QWidget:hover {{ background: {C_ROW_HOVER}; }}"
+        )
+        lay = QVBoxLayout(row)
+        lay.setContentsMargins(12, 6, 12, 6)
+        lay.setSpacing(3)
+
+        sym = trade.get("symbol", "")
+        side = trade.get("side") or "long"
+        entry = trade.get("entry")
+        exit_p = trade.get("exit")
+        qty = trade.get("qty")
+        mult = trade.get("mult")
+        broker = trade.get("broker", "")
+        entry_date = trade.get("entry_date", "")
+        exit_date = trade.get("exit_date", "")
+
+        # Üst satır: sembol + yön badge + aracı kurum
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+
+        lbl_sym = QLabel(sym)
+        lbl_sym.setFont(_f(11, QFont.DemiBold))
+        lbl_sym.setStyleSheet(f"color: {C_TEXT}; background: transparent; border: none;")
+        top.addWidget(lbl_sym)
+
+        is_long = (side != "short")
+        side_lbl = QLabel("LONG" if is_long else "SHORT")
+        side_lbl.setFont(_f(8, QFont.Bold))
+        side_lbl.setStyleSheet(
+            f"color: {'#0d1f14' if is_long else '#1f0d0d'};"
+            f" background: {C_GREEN if is_long else C_RED};"
+            f" border-radius: 2px; padding: 0px 4px; border: none;"
+        )
+        top.addWidget(side_lbl)
+
+        if broker:
+            lbl_broker = QLabel(broker)
+            lbl_broker.setFont(_f(9))
+            lbl_broker.setStyleSheet(f"color: {C_TEXT3}; background: transparent; border: none;")
+            top.addWidget(lbl_broker)
+
+        top.addStretch()
+
+        # PnL — kapalıysa exit_p, açıksa anlık fiyat
+        if closed and entry and exit_p:
+            from logic import compute_pnl
+            amount, pct = compute_pnl(entry, exit_p, qty, mult, side)
+            if pct is not None:
+                sign = "+" if pct >= 0 else "−"
+                color = C_GREEN if pct >= 0 else C_RED
+                pnl_txt = f"{sign}%{_tr(abs(pct), 1)}"
+                if amount is not None:
+                    pnl_txt = f"{sign}{_tr(abs(amount))} · {pnl_txt}"
+                lbl_pnl = QLabel(pnl_txt)
+                lbl_pnl.setFont(_f(10, QFont.DemiBold))
+                lbl_pnl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+                top.addWidget(lbl_pnl)
+        elif not closed and entry:
+            from logic import compute_pnl
+            current = getattr(self, "_last_data", {}).get(sym, {}).get("price")
+            if current is not None:
+                amount, pct = compute_pnl(entry, current, qty, mult, side)
+                if pct is not None:
+                    sign = "+" if pct >= 0 else "−"
+                    color = C_GREEN if pct >= 0 else C_RED
+                    pnl_txt = f"{sign}%{_tr(abs(pct), 1)}"
+                    if amount is not None:
+                        pnl_txt = f"{sign}{_tr(abs(amount))} · {pnl_txt}"
+                    lbl_pnl = QLabel(pnl_txt)
+                    lbl_pnl.setFont(_f(10, QFont.DemiBold))
+                    lbl_pnl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+                    top.addWidget(lbl_pnl)
+
+        lay.addLayout(top)
+
+        # Alt satır: giriş/çıkış fiyat + tarih
+        bot = QHBoxLayout()
+        bot.setContentsMargins(0, 0, 0, 0)
+        bot.setSpacing(4)
+
+        parts = []
+        if entry:
+            parts.append(f"G: {_tr(entry)}")
+        if exit_p:
+            parts.append(f"Ç: {_tr(exit_p)}")
+        if qty:
+            parts.append(f"× {_tr(qty)}")
+        if entry_date:
+            parts.append(f"| {entry_date[:10]}")
+        if exit_date:
+            parts.append(f"→ {exit_date[:10]}")
+
+        lbl_details = QLabel("  ".join(parts))
+        lbl_details.setFont(_f(9))
+        lbl_details.setStyleSheet(f"color: {C_TEXT3}; background: transparent; border: none;")
+        bot.addWidget(lbl_details)
+        bot.addStretch()
+
+        # Kapatma butonu (açık pozisyonlar için)
+        if not closed:
+            b_close = _flat("Kapat", color=C_BLUE)
+            b_close.setFont(_f(9))
+            b_close.clicked.connect(lambda _, t=trade: self._journal_close_trade(t))
+            bot.addWidget(b_close)
+
+        lay.addLayout(bot)
+        return row
+
+    def _journal_close_trade(self, trade):
+        """Açık pozisyonu kapatma sheet'i — çıkış fiyatı + aracı kurum + tarih."""
+        import datetime as _dt
+        dlg = _JournalCloseSheet(trade, parent=self)
+        dlg.exec()
+        if not dlg.result_value:
+            return
+        exit_p, broker, exit_date = dlg.result_value
+
+        journal = load_journal()
+        # Mevcut kaydı bul veya yeni oluştur
+        entry = next((t for t in journal if t.get("symbol") == trade["symbol"]
+                      and t.get("status") == "open"), None)
+        if entry is None:
+            entry = {k: trade.get(k) for k in
+                     ("symbol", "entry", "qty", "mult", "side", "entry_date", "broker")}
+            entry["status"] = "open"
+            journal.append(entry)
+
+        entry["exit"] = exit_p
+        entry["broker"] = broker or trade.get("broker", "")
+        entry["exit_date"] = exit_date
+        entry["status"] = "closed"
+        save_journal(journal)
+        self._journal_load()
+
+    def _close_position(self, symbol):
+        """Portföy satırındaki Close butonundan pozisyonu kapat."""
+        import datetime as _dt
+        stock = next((s for s in self.stocks if s["symbol"] == symbol), None)
+        if stock is None or stock.get("entry") is None:
+            return
+        trade = {
+            "symbol": symbol,
+            "entry": stock.get("entry"),
+            "qty": stock.get("qty"),
+            "mult": stock.get("mult"),
+            "side": stock.get("side", "long"),
+            "broker": "",
+            "entry_date": "",
+        }
+        current_price = getattr(self, "_last_data", {}).get(symbol, {}).get("price")
+        dlg = _JournalCloseSheet(trade, parent=self, current_price=current_price)
+        dlg.exec()
+        if not dlg.result_value:
+            return
+        exit_p, broker, exit_date = dlg.result_value
+
+        # Journal'a yaz (open kaydını güncelle veya yeni kapalı kayıt ekle)
+        journal = load_journal()
+        rec = next((t for t in journal if t.get("symbol") == symbol
+                    and t.get("status") == "open"), None)
+        if rec is None:
+            rec = {
+                "symbol": symbol,
+                "entry": stock.get("entry"),
+                "qty": stock.get("qty"),
+                "mult": stock.get("mult"),
+                "side": stock.get("side", "long"),
+                "broker": broker,
+                "entry_date": _dt.date.today().strftime("%Y-%m-%d"),
+                "status": "open",
+            }
+            journal.append(rec)
+        rec["exit"] = exit_p
+        rec["broker"] = broker
+        rec["exit_date"] = exit_date
+        rec["status"] = "closed"
+        save_journal(journal)
+
+        # Portföydeki entry'yi temizle
+        stock["entry"] = None
+        stock["exit"] = None
+        stock["qty"] = None
+        stock["mult"] = None
+        stock["side"] = None
+        save_stocks(self.stocks)
+        self._update_row_levels(symbol)
+
+    def _update_row_levels(self, symbol):
+        row = self.rows.get(symbol)
+        if row:
+            row._entry = row._exit = row._qty = row._mult = row._side = None
+            row._sync_target()
 
     # ── 𝕏 yardımcıları ──────────────────────────────────────────────────
     def _twitter_query(self):
@@ -2931,6 +3494,7 @@ class OverlayWindow(QWidget):
             self.stocks_page.setVisible(mode == 1)
             self.notes_page.setVisible(mode == 2)
             self.twitter_page.setVisible(mode == 3)
+            self.journal_page.setVisible(mode == 4)
             if mode == 1 and prev != 1:
                 self._stocks_refresh()
                 QTimer.singleShot(1500, self._rsi_refresh)
@@ -2942,10 +3506,13 @@ class OverlayWindow(QWidget):
             if mode == 3:
                 self._tw_unread.clear()
                 self._update_tab_badge()
+            if mode == 4:
+                self._journal_load()
             target_w = self._panel_w
-        self._paint_tab(self.tab_stock, self._mode == 1)
-        self._paint_tab(self.tab_notes, self._mode == 2)
+        self._paint_tab(self.tab_stock,   self._mode == 1)
+        self._paint_tab(self.tab_notes,   self._mode == 2)
         self._paint_tab(self.tab_twitter, self._mode == 3)
+        self._paint_tab(self.tab_journal, self._mode == 4)
         self._anim.stop()
         self._anim.setStartValue(min(self.panel.maximumWidth(), self._panel_w))
         self._anim.setEndValue(target_w)
@@ -3086,7 +3653,7 @@ class OverlayWindow(QWidget):
             for i, s in enumerate(items):
                 sym = s["symbol"]
                 row = StockRow(sym, s.get("entry"), s.get("exit"), s.get("qty"),
-                               s.get("mult"))
+                               s.get("mult"), s.get("side"), s.get("broker", ""))
                 hist = self._spark_history.get(sym)
                 if hist:
                     row.spark.restore(hist)
@@ -3096,6 +3663,7 @@ class OverlayWindow(QWidget):
                 row.remove_requested.connect(self._remove_stock)
                 row.levels_changed.connect(self._update_levels)
                 row.move_requested.connect(self._move_stock)
+                row.close_requested.connect(self._close_position)
                 cv.addWidget(row)
                 self.rows[sym] = row
                 order.append((sym, row))
@@ -3265,15 +3833,46 @@ class OverlayWindow(QWidget):
         self._rebuild_rows()
         self._apply_cached_prices()
 
-    def _update_levels(self, symbol, entry, exit_price, qty=None, mult=None):
+    def _update_levels(self, symbol, entry, exit_price, qty=None, mult=None, side=None, broker=None):
+        import datetime as _dt
         for s in self.stocks:
             if s["symbol"] == symbol:
                 s["entry"] = entry
                 s["exit"] = exit_price
                 s["qty"] = qty
                 s["mult"] = mult
+                s["side"] = side
+                s["broker"] = broker or ""
                 break
         save_stocks(self.stocks)
+
+        # Journal: entry varsa açık pozisyon olarak ekle/güncelle
+        if entry is not None:
+            journal = load_journal()
+            rec = next((t for t in journal if t.get("symbol") == symbol
+                        and t.get("status") == "open"), None)
+            if rec is None:
+                journal.append({
+                    "symbol": symbol,
+                    "entry": entry,
+                    "exit": None,
+                    "qty": qty,
+                    "mult": mult,
+                    "side": side or "long",
+                    "broker": broker or "",
+                    "entry_date": _dt.date.today().strftime("%Y-%m-%d"),
+                    "exit_date": None,
+                    "status": "open",
+                })
+            else:
+                rec.update({"entry": entry, "qty": qty, "mult": mult, "side": side or "long", "broker": broker or ""})
+            save_journal(journal)
+        elif entry is None:
+            # Entry temizlendi → journal'daki open kaydı da kaldır
+            journal = load_journal()
+            journal = [t for t in journal if not (
+                t.get("symbol") == symbol and t.get("status") == "open")]
+            save_journal(journal)
 
     # ── Veri ────────────────────────────────────────────────────────────
     def _stocks_refresh(self):
